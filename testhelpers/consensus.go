@@ -24,13 +24,13 @@ type TestView struct{}
 var _ consensus.PowerTableView = &TestView{}
 
 // Total always returns 1.
-func (tv *TestView) Total(ctx context.Context, st state.Tree, bstore blockstore.Blockstore) (uint64, error) {
-	return uint64(1), nil
+func (tv *TestView) Total(ctx context.Context, st state.Tree, bstore blockstore.Blockstore) (*types.BytesAmount, error) {
+	return types.NewBytesAmount(1), nil
 }
 
 // Miner always returns 1.
-func (tv *TestView) Miner(ctx context.Context, st state.Tree, bstore blockstore.Blockstore, mAddr address.Address) (uint64, error) {
-	return uint64(1), nil
+func (tv *TestView) Miner(ctx context.Context, st state.Tree, bstore blockstore.Blockstore, mAddr address.Address) (*types.BytesAmount, error) {
+	return types.NewBytesAmount(1), nil
 }
 
 // HasPower always returns true.
@@ -40,35 +40,28 @@ func (tv *TestView) HasPower(ctx context.Context, st state.Tree, bstore blocksto
 
 // RequireNewTipSet instantiates and returns a new tipset of the given blocks
 // and requires that the setup validation succeed.
-func RequireNewTipSet(require *require.Assertions, blks ...*types.Block) types.TipSet {
+func RequireNewTipSet(t *testing.T, blks ...*types.Block) types.TipSet {
 	ts, err := types.NewTipSet(blks...)
-	require.NoError(err)
+	require.NoError(t, err)
 	return ts
-}
-
-// RequireTipSetAdd adds a block to the provided tipset and requires that this
-// does not error.
-func RequireTipSetAdd(require *require.Assertions, blk *types.Block, ts types.TipSet) {
-	err := ts.AddBlock(blk)
-	require.NoError(err)
 }
 
 // TestPowerTableView is an implementation of the powertable view used for testing mining
 // wherein each miner has totalPower/minerPower power.
-type TestPowerTableView struct{ minerPower, totalPower uint64 }
+type TestPowerTableView struct{ minerPower, totalPower *types.BytesAmount }
 
 // NewTestPowerTableView creates a test power view with the given total power
-func NewTestPowerTableView(minerPower uint64, totalPower uint64) *TestPowerTableView {
+func NewTestPowerTableView(minerPower *types.BytesAmount, totalPower *types.BytesAmount) *TestPowerTableView {
 	return &TestPowerTableView{minerPower: minerPower, totalPower: totalPower}
 }
 
 // Total always returns value that was supplied to NewTestPowerTableView.
-func (tv *TestPowerTableView) Total(ctx context.Context, st state.Tree, bstore blockstore.Blockstore) (uint64, error) {
+func (tv *TestPowerTableView) Total(ctx context.Context, st state.Tree, bstore blockstore.Blockstore) (*types.BytesAmount, error) {
 	return tv.totalPower, nil
 }
 
 // Miner always returns value that was supplied to NewTestPowerTableView.
-func (tv *TestPowerTableView) Miner(ctx context.Context, st state.Tree, bstore blockstore.Blockstore, mAddr address.Address) (uint64, error) {
+func (tv *TestPowerTableView) Miner(ctx context.Context, st state.Tree, bstore blockstore.Blockstore, mAddr address.Address) (*types.BytesAmount, error) {
 	return tv.minerPower, nil
 }
 
@@ -79,31 +72,32 @@ func (tv *TestPowerTableView) HasPower(ctx context.Context, st state.Tree, bstor
 
 // NewValidTestBlockFromTipSet creates a block for when proofs & power table don't need
 // to be correct
-func NewValidTestBlockFromTipSet(baseTipSet types.TipSet, stateRootCid cid.Cid, height uint64, minerAddr address.Address, minerPubKey []byte, signer consensus.TicketSigner) *types.Block {
-	postProof := MakeRandomPoSTProofForTest()
-	ticket, _ := consensus.CreateTicket(postProof, minerPubKey, signer)
+func NewValidTestBlockFromTipSet(baseTipSet types.TipSet, stateRootCid cid.Cid, height uint64, minerAddr address.Address, minerWorker address.Address, signer consensus.TicketSigner) *types.Block {
+	poStProof := MakeRandomPoStProofForTest()
+	ticket, _ := consensus.CreateTicket(poStProof, minerWorker, signer)
 
 	return &types.Block{
 		Miner:        minerAddr,
 		Ticket:       ticket,
-		Parents:      baseTipSet.ToSortedCidSet(),
+		Parents:      baseTipSet.Key(),
 		ParentWeight: types.Uint64(10000 * height),
 		Height:       types.Uint64(height),
 		Nonce:        types.Uint64(height),
 		StateRoot:    stateRootCid,
-		Proof:        postProof,
+		Proof:        poStProof,
 	}
 }
 
-// MakeRandomPoSTProofForTest creates a random proof.
-func MakeRandomPoSTProofForTest() types.PoStProof {
-	p := MakeRandomBytes(192)
+// MakeRandomPoStProofForTest creates a random proof.
+func MakeRandomPoStProofForTest() []byte {
+	proofSize := types.OnePoStProofPartition.ProofLen()
+	p := MakeRandomBytes(proofSize)
 	p[0] = 42
-	var postProof types.PoStProof
+	poStProof := make([]byte, proofSize)
 	for idx, elem := range p {
-		postProof[idx] = elem
+		poStProof[idx] = elem
 	}
-	return postProof
+	return poStProof
 }
 
 // TestSignedMessageValidator is a validator that doesn't validate to simplify message creation in tests.
@@ -128,8 +122,26 @@ func (tbr *TestBlockRewarder) BlockReward(ctx context.Context, st state.Tree, mi
 }
 
 // GasReward does nothing
-func (tbr *TestBlockRewarder) GasReward(ctx context.Context, st state.Tree, minerAddr address.Address, msg *types.SignedMessage, cost *types.AttoFIL) error {
+func (tbr *TestBlockRewarder) GasReward(ctx context.Context, st state.Tree, minerAddr address.Address, msg *types.SignedMessage, cost types.AttoFIL) error {
 	// do nothing to keep state root the same
+	return nil
+}
+
+// FakeBlockValidator passes everything as valid
+type FakeBlockValidator struct{}
+
+// NewFakeBlockValidator createas a FakeBlockValidator that passes everything as valid.
+func NewFakeBlockValidator() *FakeBlockValidator {
+	return &FakeBlockValidator{}
+}
+
+// ValidateSemantic does nothing.
+func (fbv *FakeBlockValidator) ValidateSemantic(ctx context.Context, child *types.Block, parents *types.TipSet) error {
+	return nil
+}
+
+// ValidateSyntax does nothing.
+func (fbv *FakeBlockValidator) ValidateSyntax(ctx context.Context, blk *types.Block) error {
 	return nil
 }
 
@@ -173,13 +185,19 @@ func newMessageApplier(smsg *types.SignedMessage, processor *consensus.DefaultPr
 	return nil, err
 }
 
-// CreateAndApplyTestMessage wraps the given parameters in a message and calls ApplyTestMessage
-func CreateAndApplyTestMessage(t *testing.T, st state.Tree, vms vm.StorageMap, to address.Address, val, bh uint64, method string, ancestors []types.TipSet, params ...interface{}) (*consensus.ApplicationResult, error) {
+// CreateAndApplyTestMessageFrom wraps the given parameters in a message and calls ApplyTestMessage.
+func CreateAndApplyTestMessageFrom(t *testing.T, st state.Tree, vms vm.StorageMap, from address.Address, to address.Address, val, bh uint64, method string, ancestors []types.TipSet, params ...interface{}) (*consensus.ApplicationResult, error) {
 	t.Helper()
 
 	pdata := actor.MustConvertParams(params...)
-	msg := types.NewMessage(address.TestAddress, to, 0, types.NewAttoFILFromFIL(val), method, pdata)
+	msg := types.NewMessage(from, to, 0, types.NewAttoFILFromFIL(val), method, pdata)
 	return applyTestMessageWithAncestors(st, vms, msg, types.NewBlockHeight(bh), ancestors)
+}
+
+// CreateAndApplyTestMessage wraps the given parameters in a message and calls
+// CreateAndApplyTestMessageFrom sending the message from address.TestAddress
+func CreateAndApplyTestMessage(t *testing.T, st state.Tree, vms vm.StorageMap, to address.Address, val, bh uint64, method string, ancestors []types.TipSet, params ...interface{}) (*consensus.ApplicationResult, error) {
+	return CreateAndApplyTestMessageFrom(t, st, vms, address.TestAddress, to, val, bh, method, ancestors, params...)
 }
 
 func applyTestMessageWithAncestors(st state.Tree, store vm.StorageMap, msg *types.Message, bh *types.BlockHeight, ancestors []types.TipSet) (*consensus.ApplicationResult, error) {

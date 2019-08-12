@@ -27,9 +27,10 @@ import (
 	logging "github.com/ipfs/go-log"
 	"github.com/mitchellh/go-homedir"
 
-	"github.com/filecoin-project/go-filecoin/proofs"
+	"github.com/filecoin-project/go-filecoin/proofs/libsectorbuilder"
 	"github.com/filecoin-project/go-filecoin/protocol/storage/storagedeal"
 	"github.com/filecoin-project/go-filecoin/tools/fast"
+	"github.com/filecoin-project/go-filecoin/tools/fast/environment"
 	"github.com/filecoin-project/go-filecoin/tools/fast/series"
 	lpfc "github.com/filecoin-project/go-filecoin/tools/iptb-plugins/filecoin/local"
 )
@@ -42,12 +43,11 @@ var (
 	err             error
 	fil             = 100000
 	balance         big.Int
-	smallSectors           = true
-	minerCount             = 5
-	minerPledge     uint64 = 10
-	minerCollateral        = big.NewInt(500)
-	minerPrice             = big.NewFloat(0.000000001)
-	minerExpiry            = big.NewInt(24 * 60 * 60)
+	smallSectors    = true
+	minerCount      = 5
+	minerCollateral = big.NewInt(500)
+	minerPrice      = big.NewFloat(0.000000001)
+	minerExpiry     = big.NewInt(24 * 60 * 60)
 
 	exitcode int
 
@@ -89,7 +89,6 @@ func init() {
 	flag.BoolVar(&smallSectors, "small-sectors", smallSectors, "enables small sectors")
 	flag.DurationVar(&blocktime, "blocktime", blocktime, "duration for blocktime")
 	flag.IntVar(&minerCount, "miner-count", minerCount, "number of miners")
-	flag.Uint64Var(&minerPledge, "miner-pledge", minerPledge, "number of sectors to pledge for each miner")
 	flag.StringVar(&minerCollateralArg, "miner-collateral", minerCollateralArg, "amount of fil each miner will use for collateral")
 	flag.StringVar(&minerPriceArg, "miner-price", minerPriceArg, "price value used when creating ask for miners")
 	flag.StringVar(&minerExpiryArg, "miner-expiry", minerExpiryArg, "expiry value used when creating ask for miners")
@@ -171,7 +170,7 @@ func main() {
 		return
 	}
 
-	env, err := fast.NewEnvironmentMemoryGenesis(&balance, workdir, getProofsMode(smallSectors))
+	env, err := environment.NewMemoryGenesis(&balance, workdir, getProofsMode(smallSectors))
 	if err != nil {
 		exitcode = handleError(err)
 		return
@@ -193,7 +192,7 @@ func main() {
 		return
 	}
 
-	fastenvOpts := fast.EnvironmentOpts{
+	fastenvOpts := fast.FilecoinOpts{
 		InitOpts:   []fast.ProcessInitOption{fast.POGenesisFile(genesisURI)},
 		DaemonOpts: []fast.ProcessDaemonOption{fast.POBlockTime(blocktime)},
 	}
@@ -242,16 +241,16 @@ func main() {
 	// SendFilecoinDefaults
 	// 4. Issue FIL to node
 	//
-	// CreateMinerWithAsk
+	// CreateStorageMinerWithAsk
 	// 5. Create a new miner
 	// 6. Set the miner price, and get ask
 	//
 	// ImportAndStore
 	// 7. Generated some random data and import it to genesis
-	// 8. Genesis propposes a storage deal with miner
+	// 8. Genesis proposes a storage deal with miner
 	//
 	// WaitForDealState
-	// 9. Query deal till posted
+	// 9. Query deal till complete
 
 	var deals []*storagedeal.Response
 
@@ -274,20 +273,14 @@ func main() {
 			return
 		}
 
-		ask, err := series.CreateMinerWithAsk(ctx, miner, minerPledge, minerCollateral, minerPrice, minerExpiry)
+		ask, err := series.CreateStorageMinerWithAsk(ctx, miner, minerCollateral, minerPrice, minerExpiry)
 		if err != nil {
-			exitcode = handleError(err, "failed series.CreateMinerWithAsk;")
-			return
-		}
-
-		max, err := getMaxUserBytesPerStagedSector()
-		if err != nil {
-			exitcode = handleError(err, "failed to get max user bytes per staged sector;")
+			exitcode = handleError(err, "failed series.CreateStorageMinerWithAsk;")
 			return
 		}
 
 		var data bytes.Buffer
-		dataReader := io.LimitReader(rand.Reader, int64(max))
+		dataReader := io.LimitReader(rand.Reader, int64(getMaxUserBytesPerStagedSector()))
 		dataReader = io.TeeReader(dataReader, &data)
 		_, deal, err := series.ImportAndStore(ctx, genesis, ask, files.NewReaderFile(dataReader))
 		if err != nil {
@@ -299,7 +292,7 @@ func main() {
 	}
 
 	for _, deal := range deals {
-		err = series.WaitForDealState(ctx, genesis, deal, storagedeal.Posted)
+		err = series.WaitForDealState(ctx, genesis, deal, storagedeal.Complete)
 		if err != nil {
 			exitcode = handleError(err, "failed series.WaitForDealState;")
 			return
@@ -356,16 +349,8 @@ func main() {
 	<-exit
 }
 
-func getMaxUserBytesPerStagedSector() (uint64, error) {
-	proofsMode := getProofsMode(smallSectors)
-	var sectorClass types.SectorClass
-	if proofsMode == types.TestProofsMode {
-		sectorClass = types.NewTestSectorClass()
-	} else {
-		sectorClass = types.NewLiveSectorClass()
-	}
-
-	return proofs.GetMaxUserBytesPerStagedSector(sectorClass.SectorSize())
+func getMaxUserBytesPerStagedSector() uint64 {
+	return libsectorbuilder.GetMaxUserBytesPerStagedSector(types.OneKiBSectorSize.Uint64())
 }
 
 func handleError(err error, msg ...string) int {

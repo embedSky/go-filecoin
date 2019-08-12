@@ -4,22 +4,14 @@ import (
 	"context"
 
 	"github.com/pkg/errors"
+	"go.opencensus.io/trace"
 
-	"github.com/filecoin-project/go-filecoin/consensus"
-	"github.com/filecoin-project/go-filecoin/sampling"
+	"github.com/filecoin-project/go-filecoin/metrics/tracing"
 	"github.com/filecoin-project/go-filecoin/types"
 )
 
-// GetRecentAncestorsOfHeaviestChain returns the ancestors of a `TipSet` with
-// height `descendantBlockHeight` in the heaviest chain.
-func GetRecentAncestorsOfHeaviestChain(ctx context.Context, chainReader ReadStore, descendantBlockHeight *types.BlockHeight) ([]types.TipSet, error) {
-	head := chainReader.GetHead()
-	headTipSetAndState, err := chainReader.GetTipSetAndState(head)
-	if err != nil {
-		return nil, err
-	}
-	return GetRecentAncestors(ctx, headTipSetAndState.TipSet, chainReader, descendantBlockHeight, consensus.AncestorRoundsNeeded, sampling.LookbackParameter)
-}
+// ErrNoCommonAncestor is returned when two chains assumed to have a common ancestor do not.
+var ErrNoCommonAncestor = errors.New("no common ancestor")
 
 // GetRecentAncestors returns the ancestors of base as a slice of TipSets.
 //
@@ -45,7 +37,12 @@ func GetRecentAncestorsOfHeaviestChain(ctx context.Context, chainReader ReadStor
 // the length of provingPeriodAncestors may vary (more null blocks -> shorter length).  The
 // length of slice extraRandomnessAncestors is a constant (at least once the
 // chain is longer than lookback tipsets).
-func GetRecentAncestors(ctx context.Context, base types.TipSet, chainReader ReadStore, childBH, ancestorRoundsNeeded *types.BlockHeight, lookback uint) ([]types.TipSet, error) {
+// This is all more complex than necessary, we should just index tipsets by height:
+// https://github.com/filecoin-project/go-filecoin/issues/3025
+func GetRecentAncestors(ctx context.Context, base types.TipSet, provider TipSetProvider, childBH, ancestorRoundsNeeded *types.BlockHeight, lookback uint) (ts []types.TipSet, err error) {
+	ctx, span := trace.StartSpan(ctx, "Chain.GetRecentAncestors")
+	defer tracing.AddErrorEndSpan(ctx, span, &err)
+
 	if lookback == 0 {
 		return nil, errors.New("lookback must be greater than 0")
 	}
@@ -56,7 +53,7 @@ func GetRecentAncestors(ctx context.Context, base types.TipSet, chainReader Read
 
 	// Step 1 -- gather all tipsets with a height greater than the earliest
 	// possible proving period start still in scope for the given head.
-	iterator := IterAncestors(ctx, chainReader, base)
+	iterator := IterAncestors(ctx, provider, base)
 	provingPeriodAncestors, err := CollectTipSetsOfHeightAtLeast(ctx, iterator, earliestAncestorHeight)
 	if err != nil {
 		return nil, err
@@ -71,11 +68,11 @@ func GetRecentAncestors(ctx context.Context, base types.TipSet, chainReader Read
 	}
 
 	// Step 2 -- gather the lookback tipsets directly preceding provingPeriodAncestors.
-	tsas, err := chainReader.GetTipSetAndState(firstExtraRandomnessAncestorsCids)
+	lookBackTS, err := provider.GetTipSet(firstExtraRandomnessAncestorsCids)
 	if err != nil {
 		return nil, err
 	}
-	iterator = IterAncestors(ctx, chainReader, tsas.TipSet)
+	iterator = IterAncestors(ctx, provider, lookBackTS)
 	extraRandomnessAncestors, err := CollectAtMostNTipSets(ctx, iterator, lookback)
 	if err != nil {
 		return nil, err
@@ -117,4 +114,44 @@ func CollectAtMostNTipSets(ctx context.Context, iterator *TipsetIterator, n uint
 		}
 	}
 	return ret, nil
+}
+
+// FindCommonAncestor returns the common ancestor of the two tipsets pointed to
+// by the input iterators.  If they share no common ancestor ErrNoCommonAncestor
+// will be returned.
+func FindCommonAncestor(leftIter, rightIter *TipsetIterator) (types.TipSet, error) {
+	for !rightIter.Complete() && !leftIter.Complete() {
+		left := leftIter.Value()
+		right := rightIter.Value()
+
+		leftHeight, err := left.Height()
+		if err != nil {
+			return types.UndefTipSet, err
+		}
+		rightHeight, err := right.Height()
+		if err != nil {
+			return types.UndefTipSet, err
+		}
+
+		// Found common ancestor.
+		if left.Equals(right) {
+			return left, nil
+		}
+
+		// Update the pointers.  Pointers move back one tipset if they
+		// point to a tipset at the same height or higher than the
+		// other pointer's tipset.
+		if rightHeight >= leftHeight {
+			if err := rightIter.Next(); err != nil {
+				return types.UndefTipSet, err
+			}
+		}
+
+		if leftHeight >= rightHeight {
+			if err := leftIter.Next(); err != nil {
+				return types.UndefTipSet, err
+			}
+		}
+	}
+	return types.UndefTipSet, ErrNoCommonAncestor
 }

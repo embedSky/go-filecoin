@@ -3,6 +3,7 @@ package mining
 import (
 	"context"
 	"sync"
+	"testing"
 	"time"
 
 	"github.com/ipfs/go-ipfs-blockstore"
@@ -63,10 +64,10 @@ func NewTestWorkerWithDeps(f func(context.Context, types.TipSet, int, chan<- Out
 
 // MakeEchoMine returns a test worker function that itself returns the first
 // block of the input tipset as output.
-func MakeEchoMine(require *require.Assertions) func(context.Context, types.TipSet, int, chan<- Output) bool {
+func MakeEchoMine(t *testing.T) func(context.Context, types.TipSet, int, chan<- Output) bool {
 	echoMine := func(c context.Context, ts types.TipSet, nullBlkCount int, outCh chan<- Output) bool {
-		require.NotEqual(0, len(ts))
-		b := ts.ToSlice()[0]
+		require.True(t, ts.Defined())
+		b := ts.At(0)
 		select {
 		case outCh <- Output{NewBlock: b}:
 		case <-c.Done():
@@ -127,13 +128,13 @@ func NewTestPowerTableView(n uint64) *TestPowerTableView {
 }
 
 // Total always returns n.
-func (tv *TestPowerTableView) Total(ctx context.Context, st state.Tree, bstore blockstore.Blockstore) (uint64, error) {
-	return tv.n, nil
+func (tv *TestPowerTableView) Total(ctx context.Context, st state.Tree, bstore blockstore.Blockstore) (*types.BytesAmount, error) {
+	return types.NewBytesAmount(tv.n), nil
 }
 
 // Miner always returns 1.
-func (tv *TestPowerTableView) Miner(ctx context.Context, st state.Tree, bstore blockstore.Blockstore, mAddr address.Address) (uint64, error) {
-	return uint64(1), nil
+func (tv *TestPowerTableView) Miner(ctx context.Context, st state.Tree, bstore blockstore.Blockstore, mAddr address.Address) (*types.BytesAmount, error) {
+	return types.NewBytesAmount(uint64(1)), nil
 }
 
 // HasPower always returns true.

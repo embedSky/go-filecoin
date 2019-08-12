@@ -3,7 +3,7 @@
 [![CircleCI](https://circleci.com/gh/filecoin-project/go-filecoin.svg?style=svg)](https://circleci.com/gh/filecoin-project/go-filecoin)
 [![User Devnet Release](https://img.shields.io/endpoint.svg?color=brightgreen&style=flat&logo=GitHub&url=https://raw.githubusercontent.com/filecoin-project/go-filecoin-badges/master/user-devnet.json)](https://github.com/filecoin-project/go-filecoin/releases/latest)
 [![Nightly Devnet Release](https://img.shields.io/endpoint.svg?color=blue&style=flat&logo=GitHub&url=https://raw.githubusercontent.com/filecoin-project/go-filecoin-badges/master/nightly-devnet.json)](https://github.com/filecoin-project/go-filecoin/releases)
-[![Test Devnet Release](https://img.shields.io/endpoint.svg?color=brightgreen&style=flat&logo=GitHub&url=https://raw.githubusercontent.com/filecoin-project/go-filecoin-badges/master/test-devnet.json)](https://github.com/filecoin-project/go-filecoin/releases)
+[![Staging Devnet Release](https://img.shields.io/endpoint.svg?color=brightgreen&style=flat&logo=GitHub&url=https://raw.githubusercontent.com/filecoin-project/go-filecoin-badges/master/staging-devnet.json)](https://github.com/filecoin-project/go-filecoin/releases)
 
 > Filecoin implementation in Go, turning the world’s unused storage into an algorithmic market.
 
@@ -85,11 +85,11 @@ The build process for go-filecoin requires:
 
 - [Go](https://golang.org/doc/install) >= v1.12.1
   - Installing Go for the first time? We recommend [this tutorial](https://www.ardanlabs.com/blog/2016/05/installing-go-and-your-workspace.html) which includes environment setup.
-- [Rust](https://www.rust-lang.org/) >= v1.31.0 and `cargo`
+- [Rust](https://www.rust-lang.org/) >= v1.36.0 and `cargo`
 - `pkg-config` - used by go-filecoin to handle generating linker flags
   - Mac OS devs can install through brew `brew install pkg-config`
 
-Due to our use of `cgo`, you'll need a C compiler to build go-filecoin whether you're using a prebuilt libfilecoin_proofs (our cgo-compatible rust-fil-proofs library) or building it yourself from source. If you want to use `gcc` (e.g. `export CC=gcc`) when building go-filecoin, you will need to use v7.4.0 or higher.
+Due to our use of `cgo`, you'll need a C compiler to build go-filecoin whether you're using a prebuilt libsector_builder_ffi (our cgo-compatible rust-fil-proofs library) or building it yourself from source. If you want to use `gcc` (e.g. `export CC=gcc`) when building go-filecoin, you will need to use v7.4.0 or higher.
   - You must have libclang on you linker search path in order to build
     rust-fil-proofs from source. You can satisfy this requirement in most
     environments by installing Clang using your favorite package manager.
@@ -186,7 +186,7 @@ To see a full list of commands, run `go-filecoin --help`.
 #### Connecting to a devnet with different code
 
 In order to prevent user error, code has been added to filecoin that makes it hard to accidentally connect to the user
-or test devnets without the correct code. If you are actively developing filecoin and would like to check compatibility
+or staging devnets without the correct code. If you are actively developing filecoin and would like to check compatibility
 of your code with these devnets, you can still run your node on the devnet. This is done by building filecoin with the
 following command:
 

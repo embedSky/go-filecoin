@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/libp2p/go-libp2p-peerstore"
+	"github.com/libp2p/go-libp2p-core/peer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -19,7 +19,7 @@ import (
 
 func connect(t *testing.T, nd1, nd2 *Node) {
 	t.Helper()
-	pinfo := peerstore.PeerInfo{
+	pinfo := peer.AddrInfo{
 		ID:    nd2.Host().ID(),
 		Addrs: nd2.Host().Addrs(),
 	}
@@ -32,14 +32,11 @@ func connect(t *testing.T, nd1, nd2 *Node) {
 func TestBlockPropsManyNodes(t *testing.T) {
 	tf.UnitTest(t)
 
-	require := require.New(t)
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	assert := assert.New(t)
 
 	numNodes := 4
-	minerAddr, nodes := makeNodes(t, assert, numNodes)
+	minerAddr, nodes := makeNodes(t, numNodes)
 
 	// Now add 10 null blocks and 1 tipset.
 	signer, ki := types.NewMockSignersAndKeyInfo(1)
@@ -55,29 +52,31 @@ func TestBlockPropsManyNodes(t *testing.T) {
 	connect(t, nodes[2], nodes[3])
 
 	head := minerNode.ChainReader.GetHead()
-	headTipSetAndState, err := minerNode.ChainReader.GetTipSetAndState(head)
-	require.NoError(err)
-	baseTS := headTipSetAndState.TipSet
+	headTipSet, err := minerNode.ChainReader.GetTipSet(head)
+	require.NoError(t, err)
+	baseTS := headTipSet
 	require.NotNil(t, baseTS)
-	proof := testhelpers.MakeRandomPoSTProofForTest()
+	proof := testhelpers.MakeRandomPoStProofForTest()
 
 	ticket, err := signer.CreateTicket(proof, mockSignerPubKey)
-	require.NoError(err)
+	require.NoError(t, err)
 
 	nextBlk := &types.Block{
-		Miner:        minerAddr,
-		Parents:      baseTS.ToSortedCidSet(),
-		Height:       types.Uint64(1),
-		ParentWeight: types.Uint64(10000),
-		StateRoot:    baseTS.ToSlice()[0].StateRoot,
-		Proof:        proof,
-		Ticket:       ticket,
+		Miner:           minerAddr,
+		Parents:         baseTS.Key(),
+		Height:          types.Uint64(1),
+		ParentWeight:    types.Uint64(10000),
+		StateRoot:       baseTS.ToSlice()[0].StateRoot,
+		Proof:           proof,
+		Ticket:          ticket,
+		Messages:        types.EmptyMessagesCID,
+		MessageReceipts: types.EmptyReceiptsCID,
 	}
 
 	// Wait for network connection notifications to propagate
 	time.Sleep(time.Millisecond * 300)
 
-	assert.NoError(minerNode.AddNewBlock(ctx, nextBlk))
+	assert.NoError(t, minerNode.AddNewBlock(ctx, nextBlk))
 
 	equal := false
 	for i := 0; i < 30; i++ {
@@ -92,37 +91,43 @@ func TestBlockPropsManyNodes(t *testing.T) {
 		}
 	}
 
-	assert.True(equal, "failed to sync chains")
-
+	assert.True(t, equal, "failed to sync chains")
 }
 
 func TestChainSync(t *testing.T) {
 	tf.UnitTest(t)
 
 	ctx := context.Background()
-	assert := assert.New(t)
-	require := require.New(t)
 
-	minerAddr, nodes := makeNodes(t, assert, 2)
+	minerAddr, nodes := makeNodes(t, 2)
 	StartNodes(t, nodes)
 	defer StopNodes(nodes)
 
 	head := nodes[0].ChainReader.GetHead()
-	headTipSetAndState, err := nodes[0].ChainReader.GetTipSetAndState(head)
-	require.NoError(err)
-	baseTS := headTipSetAndState.TipSet
+	headTipSet, err := nodes[0].ChainReader.GetTipSet(head)
+	require.NoError(t, err)
+	baseTS := headTipSet
 
 	signer, ki := types.NewMockSignersAndKeyInfo(1)
-	mockSignerPubKey := ki[0].PublicKey()
+	minerWorker, err := ki[0].Address()
+	require.NoError(t, err)
 	stateRoot := baseTS.ToSlice()[0].StateRoot
+	msgsCid := types.EmptyMessagesCID
+	rcptsCid := types.EmptyReceiptsCID
 
-	nextBlk1 := testhelpers.NewValidTestBlockFromTipSet(baseTS, stateRoot, 1, minerAddr, mockSignerPubKey, signer)
-	nextBlk2 := testhelpers.NewValidTestBlockFromTipSet(baseTS, stateRoot, 2, minerAddr, mockSignerPubKey, signer)
-	nextBlk3 := testhelpers.NewValidTestBlockFromTipSet(baseTS, stateRoot, 3, minerAddr, mockSignerPubKey, signer)
+	nextBlk1 := testhelpers.NewValidTestBlockFromTipSet(baseTS, stateRoot, 1, minerAddr, minerWorker, signer)
+	nextBlk1.Messages = msgsCid
+	nextBlk1.MessageReceipts = rcptsCid
+	nextBlk2 := testhelpers.NewValidTestBlockFromTipSet(baseTS, stateRoot, 2, minerAddr, minerWorker, signer)
+	nextBlk2.Messages = msgsCid
+	nextBlk2.MessageReceipts = rcptsCid
+	nextBlk3 := testhelpers.NewValidTestBlockFromTipSet(baseTS, stateRoot, 3, minerAddr, minerWorker, signer)
+	nextBlk3.Messages = msgsCid
+	nextBlk3.MessageReceipts = rcptsCid
 
-	assert.NoError(nodes[0].AddNewBlock(ctx, nextBlk1))
-	assert.NoError(nodes[0].AddNewBlock(ctx, nextBlk2))
-	assert.NoError(nodes[0].AddNewBlock(ctx, nextBlk3))
+	assert.NoError(t, nodes[0].AddNewBlock(ctx, nextBlk1))
+	assert.NoError(t, nodes[0].AddNewBlock(ctx, nextBlk2))
+	assert.NoError(t, nodes[0].AddNewBlock(ctx, nextBlk3))
 
 	connect(t, nodes[0], nodes[1])
 	equal := false
@@ -136,7 +141,7 @@ func TestChainSync(t *testing.T) {
 		time.Sleep(time.Millisecond * 20)
 	}
 
-	assert.True(equal, "failed to sync chains")
+	assert.True(t, equal, "failed to sync chains")
 }
 
 type ZeroRewarder struct{}
@@ -145,12 +150,12 @@ func (r *ZeroRewarder) BlockReward(ctx context.Context, st state.Tree, minerAddr
 	return nil
 }
 
-func (r *ZeroRewarder) GasReward(ctx context.Context, st state.Tree, minerAddr address.Address, msg *types.SignedMessage, cost *types.AttoFIL) error {
+func (r *ZeroRewarder) GasReward(ctx context.Context, st state.Tree, minerAddr address.Address, msg *types.SignedMessage, cost types.AttoFIL) error {
 	return nil
 }
 
 // makeNodes makes at least two nodes, a miner and a client; numNodes is the total wanted
-func makeNodes(t *testing.T, assertions *assert.Assertions, numNodes int) (address.Address, []*Node) {
+func makeNodes(t *testing.T, numNodes int) (address.Address, []*Node) {
 	seed := MakeChainSeed(t, TestGenCfg)
 	configOpts := []ConfigOpt{RewarderConfigOption(&ZeroRewarder{})}
 	minerNode := MakeNodeWithChainSeed(t, seed, configOpts,
@@ -158,9 +163,9 @@ func makeNodes(t *testing.T, assertions *assert.Assertions, numNodes int) (addre
 		AutoSealIntervalSecondsOpt(1),
 	)
 	seed.GiveKey(t, minerNode, 0)
-	mineraddr, minerOwnerAddr := seed.GiveMiner(t, minerNode, 0)
-	_, err := storage.NewMiner(mineraddr, minerOwnerAddr, minerNode, minerNode.Repo.DealsDatastore(), minerNode.PorcelainAPI)
-	assertions.NoError(err)
+	mineraddr, ownerAddr := seed.GiveMiner(t, minerNode, 0)
+	_, err := storage.NewMiner(mineraddr, ownerAddr, ownerAddr, &storage.FakeProver{}, types.OneKiBSectorSize, minerNode, minerNode.Repo.DealsDatastore(), minerNode.PorcelainAPI)
+	assert.NoError(t, err)
 
 	nodes := []*Node{minerNode}
 

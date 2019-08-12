@@ -1,6 +1,7 @@
 package fast
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,7 +11,7 @@ import (
 	logging "github.com/ipfs/go-log"
 	iptb "github.com/ipfs/iptb/testbed"
 	"github.com/ipfs/iptb/testbed/interfaces"
-	"github.com/libp2p/go-libp2p-peer"
+	"github.com/libp2p/go-libp2p-core/peer"
 
 	fcconfig "github.com/filecoin-project/go-filecoin/config"
 	"github.com/filecoin-project/go-filecoin/tools/fast/fastutil"
@@ -19,14 +20,20 @@ import (
 )
 
 var (
-	// ErrDoubleInitOpts is returned by InitDaemon when both init options are provided by EnvironmentOpts
+	// ErrDoubleInitOpts is returned by InitDaemon when both init options are provided by FilecoinOpts
 	// in NewProcess as well as passed to InitDaemon directly.
 	ErrDoubleInitOpts = errors.New("cannot provide both init options through environment and arguments")
 
-	// ErrDoubleDaemonOpts is returned by StartDaemon when both init options are provided by EnvironmentOpts
+	// ErrDoubleDaemonOpts is returned by StartDaemon when both init options are provided by FilecoinOpts
 	// in NewProcess as well as passed to StartDaemon directly.
 	ErrDoubleDaemonOpts = errors.New("cannot provide both daemon options through environment and arguments")
 )
+
+// FilecoinOpts are used define process init and daemon options for the environment.
+type FilecoinOpts struct {
+	InitOpts   []ProcessInitOption
+	DaemonOpts []ProcessDaemonOption
+}
 
 // must register all filecoin iptb plugins first.
 func init() {
@@ -86,7 +93,7 @@ type Filecoin struct {
 }
 
 // NewFilecoinProcess returns a pointer to a Filecoin process that wraps the IPTB core interface `c`.
-func NewFilecoinProcess(ctx context.Context, c IPTBCoreExt, eo EnvironmentOpts) *Filecoin {
+func NewFilecoinProcess(ctx context.Context, c IPTBCoreExt, eo FilecoinOpts) *Filecoin {
 	return &Filecoin{
 		core:       c,
 		Log:        logging.Logger(c.String()),
@@ -152,14 +159,20 @@ func (f *Filecoin) StopDaemon(ctx context.Context) error {
 	return f.teardownStderrCapturing()
 }
 
-// Shell starts a user shell targeting the filecoin process
+// Shell starts a user shell targeting the filecoin process. Exact behavior is plugin
+// dependent. Please refer to the plugin documentation for more information.
 func (f *Filecoin) Shell() error {
 	return f.core.Shell(f.ctx, []testbedi.Core{})
 }
 
-// Dir returns the dirtectory used by the filecoin process
+// Dir returns the dirtectory used by the filecoin process.
 func (f *Filecoin) Dir() string {
 	return f.core.Dir()
+}
+
+// String returns the string representation of the filecoin process.
+func (f *Filecoin) String() string {
+	return f.core.String()
 }
 
 // DumpLastOutput writes all the output (args, exit-code, error, stderr, stdout) of the last ran
@@ -180,6 +193,21 @@ func (f *Filecoin) DumpLastOutputJSON(w io.Writer) {
 	} else {
 		fmt.Fprintln(w, "{}") // nolint: errcheck
 	}
+}
+
+// LastCmdStdErr is the standard error output from the last command run
+func (f *Filecoin) LastCmdStdErr() io.ReadCloser {
+	return f.lastCmdOutput.Stderr()
+}
+
+// LastCmdStdErrStr is a shortcut to just get the output as string
+func (f *Filecoin) LastCmdStdErrStr() (string, error) {
+	buf := new(bytes.Buffer)
+	out := f.LastCmdStdErr()
+	if _, err := buf.ReadFrom(out); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
 }
 
 // RunCmdWithStdin runs `args` against Filecoin process `f`, a testbedi.Output and an error are returned.

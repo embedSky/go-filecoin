@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"testing"
 
 	"github.com/ipfs/go-cid"
 	"github.com/ipfs/go-hamt-ipld"
@@ -11,9 +12,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/filecoin-project/go-filecoin/address"
-	"github.com/filecoin-project/go-filecoin/chain"
 	"github.com/filecoin-project/go-filecoin/consensus"
-	"github.com/filecoin-project/go-filecoin/proofs"
+	"github.com/filecoin-project/go-filecoin/proofs/verification"
 	"github.com/filecoin-project/go-filecoin/repo"
 	"github.com/filecoin-project/go-filecoin/types"
 )
@@ -28,7 +28,7 @@ type FakeChildParams struct {
 	Parent         types.TipSet
 	StateRoot      cid.Cid
 	Signer         consensus.TicketSigner
-	MinerPubKey    []byte
+	MinerWorker    address.Address
 }
 
 // MkFakeChild creates a mock child block of a genesis block. If a
@@ -55,9 +55,15 @@ func MkFakeChild(params FakeChildParams) (*types.Block, error) {
 	con := consensus.NewExpected(cst,
 		bs,
 		NewTestProcessor(),
+		NewFakeBlockValidator(),
 		powerTableView,
 		params.GenesisCid,
-		proofs.NewFakeVerifier(true, nil))
+		&verification.FakeVerifier{
+			VerifyPoStValid:                true,
+			VerifyPieceInclusionProofValid: true,
+			VerifySealValid:                true,
+		},
+		BlockTimeTest)
 	params.Consensus = con
 	return MkFakeChildWithCon(params)
 }
@@ -72,7 +78,7 @@ func MkFakeChildWithCon(params FakeChildParams) (*types.Block, error) {
 		params.Nonce,
 		params.NullBlockCount,
 		params.MinerAddr,
-		params.MinerPubKey,
+		params.MinerWorker,
 		params.Signer,
 		wFun)
 }
@@ -84,7 +90,7 @@ func MkFakeChildCore(parent types.TipSet,
 	nonce uint64,
 	nullBlockCount uint64,
 	minerAddr address.Address,
-	minerPubKey []byte,
+	minerWorker address.Address,
 	signer consensus.TicketSigner,
 	wFun func(types.TipSet) (uint64, error)) (*types.Block, error) {
 	// State can be nil because it is assumed consensus uses a
@@ -101,9 +107,9 @@ func MkFakeChildCore(parent types.TipSet,
 	}
 	height := pHeight + uint64(1) + nullBlockCount
 
-	pIDs := parent.ToSortedCidSet()
+	pIDs := parent.Key()
 
-	newBlock := NewValidTestBlockFromTipSet(parent, stateRoot, height, minerAddr, minerPubKey, signer)
+	newBlock := NewValidTestBlockFromTipSet(parent, stateRoot, height, minerAddr, minerWorker, signer)
 
 	// Override fake values with our values
 	newBlock.Parents = pIDs
@@ -115,21 +121,21 @@ func MkFakeChildCore(parent types.TipSet,
 }
 
 // RequireMkFakeChild wraps MkFakeChild with a testify requirement that it does not error
-func RequireMkFakeChild(require *require.Assertions, params FakeChildParams) *types.Block {
+func RequireMkFakeChild(t *testing.T, params FakeChildParams) *types.Block {
 	child, err := MkFakeChild(params)
-	require.NoError(err)
+	require.NoError(t, err)
 	return child
 }
 
 // RequireMkFakeChain returns a chain of num successive tipsets (no null blocks)
 // created with MkFakeChild and starting off of base.  Nonce, genCid and
 // stateRoot parameters for the whole chain are passed in with params.
-func RequireMkFakeChain(require *require.Assertions, base types.TipSet, num int, params FakeChildParams) []types.TipSet {
+func RequireMkFakeChain(t *testing.T, base types.TipSet, num int, params FakeChildParams) []types.TipSet {
 	var ret []types.TipSet
 	params.Parent = base
 	for i := 0; i < num; i++ {
-		block := RequireMkFakeChild(require, params)
-		ts := RequireNewTipSet(require, block)
+		block := RequireMkFakeChild(t, params)
+		ts := RequireNewTipSet(t, block)
 		ret = append(ret, ts)
 		params.Parent = ts
 	}
@@ -138,15 +144,15 @@ func RequireMkFakeChain(require *require.Assertions, base types.TipSet, num int,
 
 // RequireMkFakeChildWithCon wraps MkFakeChildWithCon with a requirement that
 // it does not error.
-func RequireMkFakeChildWithCon(require *require.Assertions, params FakeChildParams) *types.Block {
+func RequireMkFakeChildWithCon(t *testing.T, params FakeChildParams) *types.Block {
 	child, err := MkFakeChildWithCon(params)
-	require.NoError(err)
+	require.NoError(t, err)
 	return child
 }
 
 // RequireMkFakeChildCore wraps MkFakeChildCore with a requirement that
 // it does not errror.
-func RequireMkFakeChildCore(require *require.Assertions,
+func RequireMkFakeChildCore(t *testing.T,
 	params FakeChildParams,
 	wFun func(types.TipSet) (uint64, error)) *types.Block {
 	child, err := MkFakeChildCore(params.Parent,
@@ -154,10 +160,10 @@ func RequireMkFakeChildCore(require *require.Assertions,
 		params.Nonce,
 		params.NullBlockCount,
 		params.MinerAddr,
-		params.MinerPubKey,
+		params.MinerWorker,
 		params.Signer,
 		wFun)
-	require.NoError(err)
+	require.NoError(t, err)
 	return child
 }
 
@@ -170,81 +176,27 @@ func MustNewTipSet(blks ...*types.Block) types.TipSet {
 	return ts
 }
 
-// RequirePutTsas ensures that the provided tipset and state is placed in the
-// input store.
-func RequirePutTsas(ctx context.Context, require *require.Assertions, chn chain.Store, tsas *chain.TipSetAndState) {
-	err := chn.PutTipSetAndState(ctx, tsas)
-	require.NoError(err)
-}
-
 // MakeProofAndWinningTicket generates a proof and ticket that will pass validateMining.
-func MakeProofAndWinningTicket(signerPubKey []byte, minerPower uint64, totalPower uint64, signer consensus.TicketSigner) (types.PoStProof, types.Signature, error) {
-
-	var postProof types.PoStProof
+func MakeProofAndWinningTicket(signerAddr address.Address, minerPower *types.BytesAmount, totalPower *types.BytesAmount, signer consensus.TicketSigner) (types.PoStProof, types.Signature, error) {
+	poStProof := make([]byte, types.OnePoStProofPartition.ProofLen())
 	var ticket types.Signature
 
-	if totalPower/minerPower > 100000 {
-		return postProof, ticket, errors.New("MakeProofAndWinningTicket: minerPower is too small for totalPower to generate a winning ticket")
+	quot := totalPower.Quo(minerPower)
+	threshold := types.NewBytesAmount(100000).Mul(types.OneKiBSectorSize)
+
+	if quot.GreaterThan(threshold) {
+		return poStProof, ticket, errors.New("MakeProofAndWinningTicket: minerPower is too small for totalPower to generate a winning ticket")
 	}
 
 	for {
-		postProof = MakeRandomPoSTProofForTest()
-		ticket, err := consensus.CreateTicket(postProof, signerPubKey, signer)
+		poStProof = MakeRandomPoStProofForTest()
+		ticket, err := consensus.CreateTicket(poStProof, signerAddr, signer)
 		if err != nil {
 			errStr := fmt.Sprintf("error creating ticket: %s", err)
 			panic(errStr)
 		}
 		if consensus.CompareTicketPower(ticket, minerPower, totalPower) {
-			return postProof, ticket, nil
+			return poStProof, ticket, nil
 		}
 	}
-}
-
-///// Fake traversal block provider implementation
-
-// FakeBlockProvider is a fake block provider.
-type FakeBlockProvider struct {
-	blocks map[cid.Cid]*types.Block
-	seq    int
-}
-
-// NewFakeBlockProvider returns a new, empty fake block provider.
-func NewFakeBlockProvider() *FakeBlockProvider {
-	return &FakeBlockProvider{
-		make(map[cid.Cid]*types.Block),
-		0,
-	}
-}
-
-// GetBlock implements BlockProvider.GetBlock to return a block by CID.
-func (bs *FakeBlockProvider) GetBlock(ctx context.Context, cid cid.Cid) (*types.Block, error) {
-	block, ok := bs.blocks[cid]
-	if ok {
-		return block, nil
-	}
-	return nil, errors.New("no such block")
-}
-
-// NewBlockWithMessages creates and stores a new block in this provider.
-func (bs *FakeBlockProvider) NewBlockWithMessages(nonce uint64, messages []*types.SignedMessage, parents ...*types.Block) *types.Block {
-	b := &types.Block{
-		Nonce:    types.Uint64(nonce),
-		Messages: messages,
-	}
-
-	if len(parents) > 0 {
-		b.Height = parents[0].Height + 1
-		b.StateRoot = parents[0].StateRoot
-		for _, p := range parents {
-			b.Parents.Add(p.Cid())
-		}
-	}
-
-	bs.blocks[b.Cid()] = b
-	return b
-}
-
-// NewBlock creates and stores a new block in this provider.
-func (bs *FakeBlockProvider) NewBlock(nonce uint64, parents ...*types.Block) *types.Block {
-	return bs.NewBlockWithMessages(nonce, []*types.SignedMessage{}, parents...)
 }

@@ -31,10 +31,10 @@ func POAutoSealIntervalSeconds(seconds int) ProcessInitOption {
 	}
 }
 
-// PODevnetTest provides the `--devnet-test` option to process at init
-func PODevnetTest() ProcessInitOption {
+// PODevnetStaging provides the `--devnet-staging` option to process at init
+func PODevnetStaging() ProcessInitOption {
 	return func() []string {
-		return []string{"--devnet-test"}
+		return []string{"--devnet-staging"}
 	}
 }
 
@@ -42,6 +42,13 @@ func PODevnetTest() ProcessInitOption {
 func PODevnetNightly() ProcessInitOption {
 	return func() []string {
 		return []string{"--devnet-nightly"}
+	}
+}
+
+// PODevnetUser provides the `--devnet-user` option to process at init
+func PODevnetUser() ProcessInitOption {
+	return func() []string {
+		return []string{"--devnet-user"}
 	}
 }
 

@@ -19,8 +19,9 @@ import (
 	"github.com/pkg/errors"
 
 	"github.com/filecoin-project/go-filecoin/config"
-	"github.com/filecoin-project/go-filecoin/mining"
+	"github.com/filecoin-project/go-filecoin/consensus"
 	"github.com/filecoin-project/go-filecoin/node"
+	"github.com/filecoin-project/go-filecoin/paths"
 	"github.com/filecoin-project/go-filecoin/repo"
 )
 
@@ -37,7 +38,7 @@ var daemonCmd = &cmds.Command{
 		cmdkit.BoolOption(OfflineMode, "start the node without networking"),
 		cmdkit.BoolOption(ELStdout),
 		cmdkit.BoolOption(IsRelay, "advertise and allow filecoin network traffic to be relayed through this node"),
-		cmdkit.StringOption(BlockTime, "time a node waits before trying to mine the next block").WithDefault(mining.DefaultBlockTime.String()),
+		cmdkit.StringOption(BlockTime, "time a node waits before trying to mine the next block").WithDefault(consensus.DefaultBlockTime.String()),
 	},
 	Run: func(req *cmds.Request, re cmds.ResponseEmitter, env cmds.Environment) error {
 		return daemonRun(req, re, env)
@@ -55,13 +56,13 @@ func daemonRun(req *cmds.Request, re cmds.ResponseEmitter, env cmds.Environment)
 	}
 
 	// second highest precedence is env vars.
-	if envapi := os.Getenv("FIL_API"); envapi != "" {
-		rep.Config().API.Address = envapi
+	if envAPI := os.Getenv("FIL_API"); envAPI != "" {
+		rep.Config().API.Address = envAPI
 	}
 
 	// highest precedence is cmd line flag.
-	if apiAddress, ok := req.Options[OptionAPI].(string); ok && apiAddress != "" {
-		rep.Config().API.Address = apiAddress
+	if flagAPI, ok := req.Options[OptionAPI].(string); ok && flagAPI != "" {
+		rep.Config().API.Address = flagAPI
 	}
 
 	if swarmAddress, ok := req.Options[SwarmAddress].(string); ok && swarmAddress != "" {
@@ -119,8 +120,11 @@ func daemonRun(req *cmds.Request, re cmds.ResponseEmitter, env cmds.Environment)
 
 func getRepo(req *cmds.Request) (repo.Repo, error) {
 	repoDir, _ := req.Options[OptionRepoDir].(string)
-	repoDir = repo.GetRepoDir(repoDir)
-	return repo.OpenFSRepo(repoDir)
+	repoDir, err := paths.GetRepoPath(repoDir)
+	if err != nil {
+		return nil, err
+	}
+	return repo.OpenFSRepo(repoDir, repo.Version)
 }
 
 func runAPIAndWait(ctx context.Context, nd *node.Node, config *config.Config, req *cmds.Request) error {
@@ -130,9 +134,10 @@ func runAPIAndWait(ctx context.Context, nd *node.Node, config *config.Config, re
 	defer nd.Stop(ctx)
 
 	servenv := &Env{
-		// TODO: should this be the passed in context?
+		// TODO: should this be the passed in context?  Issue #2641
 		blockMiningAPI: nd.BlockMiningAPI,
 		ctx:            context.Background(),
+		inspectorAPI:   NewInspectorAPI(nd.Repo),
 		porcelainAPI:   nd.PorcelainAPI,
 		retrievalAPI:   nd.RetrievalAPI,
 		storageAPI:     nd.StorageAPI,

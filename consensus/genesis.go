@@ -2,11 +2,9 @@ package consensus
 
 import (
 	"context"
-	"math/big"
-
 	"github.com/ipfs/go-hamt-ipld"
 	"github.com/ipfs/go-ipfs-blockstore"
-	"github.com/libp2p/go-libp2p-peer"
+	"github.com/libp2p/go-libp2p-core/peer"
 
 	"github.com/filecoin-project/go-filecoin/actor"
 	"github.com/filecoin-project/go-filecoin/actor/builtin"
@@ -24,23 +22,29 @@ import (
 type GenesisInitFunc func(cst *hamt.CborIpldStore, bs blockstore.Blockstore) (*types.Block, error)
 
 var (
-	defaultAccounts map[address.Address]*types.AttoFIL
+	defaultAccounts map[address.Address]types.AttoFIL
 )
 
 func init() {
-	defaultAccounts = map[address.Address]*types.AttoFIL{
-		address.NetworkAddress: types.NewAttoFILFromFIL(10000000000),
-		address.TestAddress:    types.NewAttoFILFromFIL(50000),
-		address.TestAddress2:   types.NewAttoFILFromFIL(60000),
+	defaultAccounts = map[address.Address]types.AttoFIL{
+		address.NetworkAddress:    types.NewAttoFILFromFIL(10000000000),
+		address.BurntFundsAddress: types.NewAttoFILFromFIL(0),
+		address.TestAddress:       types.NewAttoFILFromFIL(50000),
+		address.TestAddress2:      types.NewAttoFILFromFIL(60000),
 	}
+}
+
+type minerActorConfig struct {
+	state   *miner.State
+	balance types.AttoFIL
 }
 
 // Config is used to configure values in the GenesisInitFunction.
 type Config struct {
-	accounts   map[address.Address]*types.AttoFIL
+	accounts   map[address.Address]types.AttoFIL
 	nonces     map[address.Address]uint64
 	actors     map[address.Address]*actor.Actor
-	miners     map[address.Address]*miner.State
+	miners     map[address.Address]*minerActorConfig
 	proofsMode types.ProofsMode
 }
 
@@ -48,7 +52,7 @@ type Config struct {
 type GenOption func(*Config) error
 
 // ActorAccount returns a config option that sets up an actor account.
-func ActorAccount(addr address.Address, amt *types.AttoFIL) GenOption {
+func ActorAccount(addr address.Address, amt types.AttoFIL) GenOption {
 	return func(gc *Config) error {
 		gc.accounts[addr] = amt
 		return nil
@@ -56,9 +60,12 @@ func ActorAccount(addr address.Address, amt *types.AttoFIL) GenOption {
 }
 
 // MinerActor returns a config option that sets up an miner actor account.
-func MinerActor(addr address.Address, owner address.Address, key []byte, pledge uint64, pid peer.ID, coll *types.AttoFIL) GenOption {
+func MinerActor(addr address.Address, owner address.Address, pid peer.ID, coll types.AttoFIL, sectorSize *types.BytesAmount) GenOption {
 	return func(gc *Config) error {
-		gc.miners[addr] = miner.NewState(owner, key, big.NewInt(int64(pledge)), pid, coll)
+		gc.miners[addr] = &minerActorConfig{
+			state:   miner.NewState(owner, owner, pid, sectorSize),
+			balance: coll,
+		}
 		return nil
 	}
 }
@@ -92,10 +99,10 @@ func ProofsMode(proofsMode types.ProofsMode) GenOption {
 // NewEmptyConfig inits and returns an empty config
 func NewEmptyConfig() *Config {
 	return &Config{
-		accounts:   make(map[address.Address]*types.AttoFIL),
+		accounts:   make(map[address.Address]types.AttoFIL),
 		nonces:     make(map[address.Address]uint64),
 		actors:     make(map[address.Address]*actor.Actor),
-		miners:     make(map[address.Address]*miner.State),
+		miners:     make(map[address.Address]*minerActorConfig),
 		proofsMode: types.TestProofsMode,
 	}
 }
@@ -128,13 +135,14 @@ func MakeGenesisFunc(opts ...GenOption) GenesisInitFunc {
 		// Initialize miner actors
 		for addr, val := range genCfg.miners {
 			a := miner.NewActor()
+			a.Balance = val.balance
 
 			if err := st.SetActor(ctx, addr, a); err != nil {
 				return nil, err
 			}
 
 			s := storageMap.NewStorage(addr, a)
-			scid, err := s.Put(val)
+			scid, err := s.Put(val.state)
 			if err != nil {
 				return nil, err
 			}
@@ -167,9 +175,20 @@ func MakeGenesisFunc(opts ...GenOption) GenesisInitFunc {
 			return nil, err
 		}
 
+		emptyMessagesCid, err := cst.Put(ctx, []types.SignedMessage{})
+		if err != nil {
+			return nil, err
+		}
+		emptyReceiptsCid, err := cst.Put(ctx, []types.MessageReceipt{})
+		if err != nil {
+			return nil, err
+		}
+
 		genesis := &types.Block{
-			StateRoot: c,
-			Nonce:     1337,
+			StateRoot:       c,
+			Nonce:           1337,
+			Messages:        emptyMessagesCid,
+			MessageReceipts: emptyReceiptsCid,
 		}
 
 		if _, err := cst.Put(ctx, genesis); err != nil {
@@ -203,12 +222,8 @@ func SetupDefaultActors(ctx context.Context, st state.Tree, storageMap vm.Storag
 		}
 	}
 
-	stAct, err := storagemarket.NewActor()
-	if err != nil {
-		return err
-	}
-
-	err = (&storagemarket.Actor{}).InitializeState(storageMap.NewStorage(address.StorageMarketAddress, stAct), storeType)
+	stAct := storagemarket.NewActor()
+	err := (&storagemarket.Actor{}).InitializeState(storageMap.NewStorage(address.StorageMarketAddress, stAct), storeType)
 	if err != nil {
 		return err
 	}
@@ -216,13 +231,10 @@ func SetupDefaultActors(ctx context.Context, st state.Tree, storageMap vm.Storag
 		return err
 	}
 
-	pbAct := actor.NewActor(types.PaymentBrokerActorCodeCid, types.NewZeroAttoFIL())
+	pbAct := paymentbroker.NewActor()
 	err = (&paymentbroker.Actor{}).InitializeState(storageMap.NewStorage(address.PaymentBrokerAddress, pbAct), nil)
 	if err != nil {
 		return err
 	}
-
-	pbAct.Balance = types.NewAttoFILFromFIL(0)
-
 	return st.SetActor(ctx, address.PaymentBrokerAddress, pbAct)
 }

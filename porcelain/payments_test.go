@@ -9,7 +9,6 @@ import (
 	"github.com/ipfs/go-cid"
 
 	"github.com/filecoin-project/go-filecoin/actor"
-	"github.com/filecoin-project/go-filecoin/actor/builtin/paymentbroker"
 	"github.com/filecoin-project/go-filecoin/address"
 	. "github.com/filecoin-project/go-filecoin/porcelain"
 	tf "github.com/filecoin-project/go-filecoin/testhelpers/testflags"
@@ -28,7 +27,7 @@ type paymentsTestPlumbing struct {
 	height *types.BlockHeight
 	msgCid cid.Cid
 
-	messageSend  func(ctx context.Context, from, to address.Address, value *types.AttoFIL, gasPrice types.AttoFIL, gasLimit types.GasUnits, method string, params ...interface{}) (cid.Cid, error)
+	messageSend  func(ctx context.Context, from, to address.Address, value types.AttoFIL, gasPrice types.AttoFIL, gasLimit types.GasUnits, method string, params ...interface{}) (cid.Cid, error)
 	messageWait  func(ctx context.Context, msgCid cid.Cid, cb func(*types.Block, *types.SignedMessage, *types.MessageReceipt) error) error
 	messageQuery func(ctx context.Context, optFrom, to address.Address, method string, params ...interface{}) ([][]byte, error)
 }
@@ -42,7 +41,7 @@ func newTestCreatePaymentsPlumbing() *paymentsTestPlumbing {
 	return &paymentsTestPlumbing{
 		msgCid: msgCid,
 		height: types.NewBlockHeight(startingBlock),
-		messageSend: func(ctx context.Context, from, to address.Address, value *types.AttoFIL, gasPrice types.AttoFIL, gasLimit types.GasUnits, method string, params ...interface{}) (cid.Cid, error) {
+		messageSend: func(ctx context.Context, from, to address.Address, value types.AttoFIL, gasPrice types.AttoFIL, gasLimit types.GasUnits, method string, params ...interface{}) (cid.Cid, error) {
 			payer = from
 			target = params[0].(address.Address)
 			return msgCid, nil
@@ -55,12 +54,13 @@ func newTestCreatePaymentsPlumbing() *paymentsTestPlumbing {
 			})
 		},
 		messageQuery: func(ctx context.Context, optFrom, to address.Address, method string, params ...interface{}) ([][]byte, error) {
-			voucher := &paymentbroker.PaymentVoucher{
-				Channel: *channelID,
-				Payer:   payer,
-				Target:  target,
-				Amount:  *params[1].(*types.AttoFIL),
-				ValidAt: *params[2].(*types.BlockHeight),
+			voucher := &types.PaymentVoucher{
+				Channel:   *channelID,
+				Payer:     payer,
+				Target:    target,
+				Amount:    params[1].(types.AttoFIL),
+				ValidAt:   *params[2].(*types.BlockHeight),
+				Condition: params[3].(*types.Predicate),
 			}
 			voucherBytes, err := actor.MarshalStorage(voucher)
 			if err != nil {
@@ -71,7 +71,7 @@ func newTestCreatePaymentsPlumbing() *paymentsTestPlumbing {
 	}
 }
 
-func (ptp *paymentsTestPlumbing) MessageSend(ctx context.Context, from, to address.Address, value *types.AttoFIL, gasPrice types.AttoFIL, gasLimit types.GasUnits, method string, params ...interface{}) (cid.Cid, error) {
+func (ptp *paymentsTestPlumbing) MessageSend(ctx context.Context, from, to address.Address, value types.AttoFIL, gasPrice types.AttoFIL, gasLimit types.GasUnits, method string, params ...interface{}) (cid.Cid, error) {
 	return ptp.messageSend(ctx, from, to, value, gasPrice, gasLimit, method, params...)
 }
 
@@ -95,15 +95,21 @@ func validPaymentsConfig() CreatePaymentsParams {
 	addresses := address.NewForTestGetter()
 	from := addresses()
 	to := addresses()
+	minerAddress := addresses()
+	var commP types.CommP
+	copy(commP[:], []byte("commitment"))
 
 	return CreatePaymentsParams{
 		From:            from,
 		To:              to,
-		Value:           *types.NewAttoFILFromFIL(93),
+		Value:           types.NewAttoFILFromFIL(93),
 		Duration:        50,
+		MinerAddress:    minerAddress,
+		CommP:           commP,
+		PieceSize:       types.NewBytesAmount(127),
 		PaymentInterval: paymentInterval,
 		ChannelExpiry:   *types.NewBlockHeight(500),
-		GasPrice:        *types.NewAttoFILFromFIL(3),
+		GasPrice:        types.NewAttoFILFromFIL(3),
 		GasLimit:        types.NewGasUnits(300),
 	}
 }
@@ -114,112 +120,140 @@ func TestCreatePayments(t *testing.T) {
 	successPlumbing := newTestCreatePaymentsPlumbing()
 
 	t.Run("Creates channel and creates payments", func(t *testing.T) {
-		assert := assert.New(t)
-		require := require.New(t)
-
 		config := validPaymentsConfig()
 		paymentResponse, err := CreatePayments(context.Background(), successPlumbing, config)
-		require.NoError(err)
+		require.NoError(t, err)
 
 		// assert we get stats in the responses
-		assert.Equal(config.From, paymentResponse.From)
-		assert.Equal(config.To, paymentResponse.To)
-		assert.Equal(successPlumbing.msgCid, paymentResponse.ChannelMsgCid)
-		assert.Equal(types.NewChannelID(4), paymentResponse.Channel)
-		assert.Equal(types.NewAttoFILFromFIL(9), paymentResponse.GasAttoFIL)
+		assert.Equal(t, config.From, paymentResponse.From)
+		assert.Equal(t, config.To, paymentResponse.To)
+		assert.Equal(t, successPlumbing.msgCid, paymentResponse.ChannelMsgCid)
+		assert.Equal(t, types.NewChannelID(4), paymentResponse.Channel)
+		assert.Equal(t, types.NewAttoFILFromFIL(9), paymentResponse.GasAttoFIL)
 
 		// Assert the vouchers have been properly constructed.
 		// ValidAts should start at the current block + the interval, and go up by the interval each time.
 		// Amounts should evenly divide the total value.
-		require.Len(paymentResponse.Vouchers, 10)
+		require.Len(t, paymentResponse.Vouchers, 10)
 
 		expectedValuePerPayment, ok := types.NewAttoFILFromFILString("9.3")
-		require.True(ok)
+		require.True(t, ok)
 
 		for i := 0; i < 9; i++ {
 			voucher := paymentResponse.Vouchers[i]
-			assert.Equal(*types.NewChannelID(channelID), voucher.Channel)
-			assert.Equal(config.From, voucher.Payer)
-			assert.Equal(config.To, voucher.Target)
-			assert.Equal(*types.NewBlockHeight(startingBlock).Add(types.NewBlockHeight(config.PaymentInterval * uint64(i+1))), voucher.ValidAt)
-			assert.Equal(*expectedValuePerPayment.MulBigInt(big.NewInt(int64(i + 1))), voucher.Amount)
+			assert.Equal(t, *types.NewChannelID(channelID), voucher.Channel)
+			assert.Equal(t, config.From, voucher.Payer)
+			assert.Equal(t, config.To, voucher.Target)
+			assert.Equal(t, *types.NewBlockHeight(startingBlock).Add(types.NewBlockHeight(config.PaymentInterval * uint64(i+1))), voucher.ValidAt)
+			assert.Equal(t, expectedValuePerPayment.MulBigInt(big.NewInt(int64(i+1))), voucher.Amount)
+
+			// assert all vouchers other than the last have a valid condition
+			assert.NotNil(t, voucher.Condition)
+			assert.Equal(t, config.MinerAddress, voucher.Condition.To)
+			assert.Equal(t, "verifyPieceInclusion", voucher.Condition.Method)
+			assert.Equal(t, config.CommP[:], voucher.Condition.Params[0])
 
 			// voucher signature should be what is returned by SignBytes
-
 			sig := types.Signature([]byte("signature"))
-			assert.Equal(sig, voucher.Signature)
+			assert.Equal(t, sig, voucher.Signature)
 		}
 
-		// last payment should be for the full amount
-		assert.Equal(*types.NewChannelID(channelID), paymentResponse.Vouchers[9].Channel)
-		assert.Equal(config.From, paymentResponse.Vouchers[9].Payer)
-		assert.Equal(config.To, paymentResponse.Vouchers[9].Target)
-		assert.Equal(config.Value, paymentResponse.Vouchers[9].Amount)
+		// last payment should be for the full amount and have no condition
+		assert.Equal(t, *types.NewChannelID(channelID), paymentResponse.Vouchers[9].Channel)
+		assert.Equal(t, config.From, paymentResponse.Vouchers[9].Payer)
+		assert.Equal(t, config.To, paymentResponse.Vouchers[9].Target)
+		assert.Equal(t, config.Value, paymentResponse.Vouchers[9].Amount)
+		assert.Nil(t, paymentResponse.Vouchers[9].Condition)
+	})
+
+	t.Run("Payments constructed correctly when paymentInterval does not divide duration", func(t *testing.T) {
+		config := validPaymentsConfig()
+
+		// lower duration by two blocks
+		config.Duration = 48
+
+		paymentResponse, err := CreatePayments(context.Background(), successPlumbing, config)
+		require.NoError(t, err)
+
+		// Value*PaymentInterval/Duration = 93 * 5 / 48 = 9.6875
+		expectedValuePerPayment, ok := types.NewAttoFILFromFILString("9.6875")
+		require.True(t, ok)
+
+		for i := 0; i < 9; i++ {
+			voucher := paymentResponse.Vouchers[i]
+			assert.Equal(t, *types.NewBlockHeight(startingBlock).Add(types.NewBlockHeight(config.PaymentInterval * uint64(i+1))), voucher.ValidAt)
+			assert.Equal(t, expectedValuePerPayment.MulBigInt(big.NewInt(int64(i+1))), voucher.Amount)
+
+			// assert all vouchers other than the last have a valid condition
+			assert.NotNil(t, voucher.Condition)
+		}
+
+		// last payment should be for the full amount and have no condition
+		assert.Equal(t, config.Value, paymentResponse.Vouchers[9].Amount)
+		assert.Nil(t, paymentResponse.Vouchers[9].Condition)
+	})
+
+	t.Run("Payments constructed correctly when duration < paymentInterval", func(t *testing.T) {
+		config := validPaymentsConfig()
+
+		// lower duration below payment interval (5)
+		config.Duration = 3
+
+		paymentResponse, err := CreatePayments(context.Background(), successPlumbing, config)
+		require.NoError(t, err)
+
+		require.Len(t, paymentResponse.Vouchers, 1)
+
+		// last payment should be for the full amount and have no condition
+		assert.Equal(t, config.Value, paymentResponse.Vouchers[0].Amount)
+		assert.Nil(t, paymentResponse.Vouchers[0].Condition)
 	})
 
 	t.Run("Validates from", func(t *testing.T) {
-		assert := assert.New(t)
-		require := require.New(t)
-
 		config := validPaymentsConfig()
 		config.From = address.Undef
 		_, err := CreatePayments(context.Background(), successPlumbing, config)
-		require.Error(err)
-		assert.Contains(err.Error(), "From")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "From")
 	})
 
 	t.Run("Validates to", func(t *testing.T) {
-		assert := assert.New(t)
-		require := require.New(t)
-
 		config := validPaymentsConfig()
 		config.To = address.Undef
 		_, err := CreatePayments(context.Background(), successPlumbing, config)
-		require.Error(err)
-		assert.Contains(err.Error(), "To")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "To")
 	})
 
 	t.Run("Validates payment interval", func(t *testing.T) {
-		assert := assert.New(t)
-		require := require.New(t)
-
 		config := validPaymentsConfig()
 		config.PaymentInterval = 0
 		_, err := CreatePayments(context.Background(), successPlumbing, config)
-		require.Error(err)
-		assert.Contains(err.Error(), "PaymentInterval")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "PaymentInterval")
 	})
 
 	t.Run("Validates channel expiry", func(t *testing.T) {
-		assert := assert.New(t)
-		require := require.New(t)
-
 		config := validPaymentsConfig()
 		config.ChannelExpiry = *types.NewBlockHeight(startingBlock + config.PaymentInterval*10 - 1)
 		_, err := CreatePayments(context.Background(), successPlumbing, config)
-		require.Error(err)
-		assert.Contains(err.Error(), "channel would expire")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "channel would expire")
 	})
 
 	t.Run("Errors creating channel are surfaced", func(t *testing.T) {
-		assert := assert.New(t)
-		require := require.New(t)
-
 		plumbing := newTestCreatePaymentsPlumbing()
-		plumbing.messageSend = func(ctx context.Context, from, to address.Address, value *types.AttoFIL, gasPrice types.AttoFIL, gasLimit types.GasUnits, method string, params ...interface{}) (cid.Cid, error) {
+		plumbing.messageSend = func(ctx context.Context, from, to address.Address, value types.AttoFIL, gasPrice types.AttoFIL, gasLimit types.GasUnits, method string, params ...interface{}) (cid.Cid, error) {
 			return cid.Cid{}, errors.New("Error in MessageSend")
 		}
 
 		config := validPaymentsConfig()
 		_, err := CreatePayments(context.Background(), plumbing, config)
-		require.Error(err)
-		assert.Contains(err.Error(), "MessageSend")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "MessageSend")
 	})
 
 	t.Run("Errors waiting for message are surfaced", func(t *testing.T) {
-		assert := assert.New(t)
-		require := require.New(t)
-
 		plumbing := newTestCreatePaymentsPlumbing()
 		plumbing.messageWait = func(ctx context.Context, msgCid cid.Cid, cb func(*types.Block, *types.SignedMessage, *types.MessageReceipt) error) error {
 			return errors.New("Error in MessageWait")
@@ -227,14 +261,11 @@ func TestCreatePayments(t *testing.T) {
 
 		config := validPaymentsConfig()
 		_, err := CreatePayments(context.Background(), plumbing, config)
-		require.Error(err)
-		assert.Contains(err.Error(), "MessageWait")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "MessageWait")
 	})
 
 	t.Run("Errors in create channel response are surfaced", func(t *testing.T) {
-		assert := assert.New(t)
-		require := require.New(t)
-
 		plumbing := newTestCreatePaymentsPlumbing()
 		plumbing.messageWait = func(ctx context.Context, msgCid cid.Cid, cb func(*types.Block, *types.SignedMessage, *types.MessageReceipt) error) error {
 			receipt := &types.MessageReceipt{
@@ -245,14 +276,11 @@ func TestCreatePayments(t *testing.T) {
 
 		config := validPaymentsConfig()
 		_, err := CreatePayments(context.Background(), plumbing, config)
-		require.Error(err)
-		assert.Contains(err.Error(), "createChannel failed")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "createChannel failed")
 	})
 
 	t.Run("Errors in creating vouchers are surfaced", func(t *testing.T) {
-		assert := assert.New(t)
-		require := require.New(t)
-
 		plumbing := newTestCreatePaymentsPlumbing()
 		plumbing.messageQuery = func(ctx context.Context, optFrom, to address.Address, method string, params ...interface{}) ([][]byte, error) {
 			return nil, errors.New("Errors in MessageQuery")
@@ -260,7 +288,7 @@ func TestCreatePayments(t *testing.T) {
 
 		config := validPaymentsConfig()
 		_, err := CreatePayments(context.Background(), plumbing, config)
-		require.Error(err)
-		assert.Contains(err.Error(), "MessageQuery")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "MessageQuery")
 	})
 }

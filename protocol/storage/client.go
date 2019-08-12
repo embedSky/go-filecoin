@@ -3,25 +3,25 @@ package storage
 import (
 	"context"
 	"fmt"
+	"io"
 	"math/big"
 	"time"
 
 	"github.com/ipfs/go-cid"
-	cbor "github.com/ipfs/go-ipld-cbor"
 	logging "github.com/ipfs/go-log"
-	"github.com/libp2p/go-libp2p-host"
-	"github.com/libp2p/go-libp2p-peer"
-	"github.com/libp2p/go-libp2p-protocol"
+	"github.com/libp2p/go-libp2p-core/host"
+	"github.com/libp2p/go-libp2p-core/peer"
+	"github.com/libp2p/go-libp2p-core/protocol"
 	"github.com/multiformats/go-multistream"
 	"github.com/pkg/errors"
 
 	"github.com/filecoin-project/go-filecoin/actor/builtin/miner"
-	"github.com/filecoin-project/go-filecoin/actor/builtin/paymentbroker"
 	"github.com/filecoin-project/go-filecoin/address"
 	cbu "github.com/filecoin-project/go-filecoin/cborutil"
 	"github.com/filecoin-project/go-filecoin/net"
 	"github.com/filecoin-project/go-filecoin/porcelain"
 	"github.com/filecoin-project/go-filecoin/proofs"
+	"github.com/filecoin-project/go-filecoin/proofs/libsectorbuilder"
 	"github.com/filecoin-project/go-filecoin/protocol/storage/storagedeal"
 	"github.com/filecoin-project/go-filecoin/types"
 	"github.com/filecoin-project/go-filecoin/util/convert"
@@ -53,14 +53,17 @@ const (
 )
 
 type clientPorcelainAPI interface {
+	BlockTime() time.Duration
 	ChainBlockHeight() (*types.BlockHeight, error)
 	CreatePayments(ctx context.Context, config porcelain.CreatePaymentsParams) (*porcelain.CreatePaymentsReturn, error)
-	DealGet(cid.Cid) *storagedeal.Deal
+	DealGet(context.Context, cid.Cid) (*storagedeal.Deal, error)
 	DAGGetFileSize(context.Context, cid.Cid) (uint64, error)
+	DAGCat(context.Context, cid.Cid) (io.Reader, error)
 	DealPut(*storagedeal.Deal) error
-	DealsLs() ([]*storagedeal.Deal, error)
+	DealsLs(context.Context) (<-chan *porcelain.StorageDealLsResult, error)
 	MessageQuery(ctx context.Context, optFrom, to address.Address, method string, params ...interface{}) ([][]byte, error)
 	MinerGetAsk(ctx context.Context, minerAddr address.Address, askID uint64) (miner.Ask, error)
+	MinerGetSectorSize(ctx context.Context, minerAddr address.Address) (*types.BytesAmount, error)
 	MinerGetOwnerAddress(ctx context.Context, minerAddr address.Address) (address.Address, error)
 	MinerGetPeerID(ctx context.Context, minerAddr address.Address) (peer.ID, error)
 	types.Signer
@@ -71,17 +74,15 @@ type clientPorcelainAPI interface {
 // Client is used to make deals directly with storage miners.
 type Client struct {
 	api                 clientPorcelainAPI
-	blockTime           time.Duration
 	host                host.Host
 	log                 logging.EventLogger
 	ProtocolRequestFunc func(ctx context.Context, protocol protocol.ID, peer peer.ID, host host.Host, request interface{}, response interface{}) error
 }
 
 // NewClient creates a new storage client.
-func NewClient(blockTime time.Duration, host host.Host, api clientPorcelainAPI) *Client {
+func NewClient(host host.Host, api clientPorcelainAPI) *Client {
 	smc := &Client{
 		api:                 api,
-		blockTime:           blockTime,
 		host:                host,
 		log:                 logging.Logger("storage/client"),
 		ProtocolRequestFunc: MakeProtocolRequest,
@@ -92,10 +93,7 @@ func NewClient(blockTime time.Duration, host host.Host, api clientPorcelainAPI) 
 // ProposeDeal proposes a storage deal to a miner.  Pass allowDuplicates = true to
 // allow duplicate proposals without error.
 func (smc *Client) ProposeDeal(ctx context.Context, miner address.Address, data cid.Cid, askID uint64, duration uint64, allowDuplicates bool) (*storagedeal.Response, error) {
-	ctxSetup, cancel := context.WithTimeout(ctx, 5*smc.GetBlockTime())
-	defer cancel()
-
-	pid, err := smc.api.MinerGetPeerID(ctxSetup, miner)
+	pid, err := smc.api.MinerGetPeerID(ctx, miner)
 	if err != nil {
 		return nil, err
 	}
@@ -103,24 +101,40 @@ func (smc *Client) ProposeDeal(ctx context.Context, miner address.Address, data 
 	minerAlive := make(chan error, 1)
 	go func() {
 		defer close(minerAlive)
-		minerAlive <- smc.api.PingMinerWithTimeout(ctxSetup, pid, 15*time.Second)
+		minerAlive <- smc.api.PingMinerWithTimeout(ctx, pid, 15*time.Second)
 	}()
 
-	size, err := smc.api.DAGGetFileSize(ctxSetup, data)
+	pieceSize, err := smc.api.DAGGetFileSize(ctx, data)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to determine the size of the data")
 	}
 
-	sectorSize, err := smc.getSectorSize(ctx)
+	sectorSize, err := smc.api.MinerGetSectorSize(ctx, miner)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to get sector size")
 	}
 
-	if size > sectorSize {
-		return nil, fmt.Errorf("piece is %d bytes but sector size is %d bytes", size, sectorSize)
+	maxUserBytes := libsectorbuilder.GetMaxUserBytesPerStagedSector(sectorSize.Uint64())
+	if pieceSize > maxUserBytes {
+		return nil, fmt.Errorf("piece is %d bytes but sector size is %d bytes", pieceSize, maxUserBytes)
 	}
 
-	ask, err := smc.api.MinerGetAsk(ctxSetup, miner, askID)
+	pieceReader, err := smc.api.DAGCat(ctx, data)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to make piece reader")
+	}
+
+	// Generating the piece commitment is a computationally expensive operation and can take
+	// many minutes depending on the size of the piece.
+	res, err := proofs.GeneratePieceCommitment(proofs.GeneratePieceCommitmentRequest{
+		PieceReader: pieceReader,
+		PieceSize:   types.NewBytesAmount(pieceSize),
+	})
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to generate piece commitment")
+	}
+
+	ask, err := smc.api.MinerGetAsk(ctx, miner, askID)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to get ask price")
 	}
@@ -136,58 +150,66 @@ func (smc *Client) ProposeDeal(ctx context.Context, miner address.Address, data 
 		return nil, err
 	}
 
-	minerOwner, err := smc.api.MinerGetOwnerAddress(ctxSetup, miner)
+	minerOwner, err := smc.api.MinerGetOwnerAddress(ctx, miner)
 	if err != nil {
 		return nil, err
 	}
 
-	totalPrice := price.MulBigInt(big.NewInt(int64(size * duration)))
+	totalPrice := price.MulBigInt(big.NewInt(int64(pieceSize * duration)))
 
 	proposal := &storagedeal.Proposal{
 		PieceRef:     data,
-		Size:         types.NewBytesAmount(size),
+		Size:         types.NewBytesAmount(pieceSize),
 		TotalPrice:   totalPrice,
 		Duration:     duration,
 		MinerAddress: miner,
 	}
 
-	if smc.isMaybeDupDeal(proposal) && !allowDuplicates {
+	if smc.isMaybeDupDeal(ctx, proposal) && !allowDuplicates {
 		return nil, Errors[ErrDuplicateDeal]
 	}
 
 	// see if we managed to connect to the miner
-	select {
-	case err := <-minerAlive:
-		if err == net.ErrPingSelf {
-			return nil, errors.New("attempting to make storage deal with self. This is currently unsupported.  Please use a separate go-filecoin node as client")
-		}
-		if err != nil {
-			return nil, err
-		}
-	case <-ctxSetup.Done():
-		return nil, ctxSetup.Err()
+	err = <-minerAlive
+	if err == net.ErrPingSelf {
+		return nil, errors.New("attempting to make storage deal with self. This is currently unsupported.  Please use a separate go-filecoin node as client")
+	} else if err != nil {
+		return nil, err
 	}
+
+	// Always set payer because it is used for signing
+	proposal.Payment.Payer = fromAddress
 
 	// create payment information
-	cpResp, err := smc.api.CreatePayments(ctxSetup, porcelain.CreatePaymentsParams{
-		From:            fromAddress,
-		To:              minerOwner,
-		Value:           *price.MulBigInt(big.NewInt(int64(size * duration))),
-		Duration:        duration,
-		PaymentInterval: VoucherInterval,
-		ChannelExpiry:   *chainHeight.Add(types.NewBlockHeight(duration + ChannelExpiryInterval)),
-		GasPrice:        *types.NewAttoFIL(big.NewInt(CreateChannelGasPrice)),
-		GasLimit:        types.NewGasUnits(CreateChannelGasLimit),
-	})
-	if err != nil {
-		return nil, errors.Wrap(err, "error creating payment")
-	}
+	totalCost := price.MulBigInt(big.NewInt(int64(pieceSize * duration)))
+	if totalCost.GreaterThan(types.ZeroAttoFIL) {
+		// The payment setup requires that the payment is mined into a block, currently we
+		// will wait for at most 5 blocks to be mined before giving up
+		ctxPaymentSetup, cancel := context.WithTimeout(ctx, 5*smc.api.BlockTime())
+		defer cancel()
 
-	proposal.Payment.Channel = cpResp.Channel
-	proposal.Payment.PayChActor = address.PaymentBrokerAddress
-	proposal.Payment.Payer = fromAddress
-	proposal.Payment.ChannelMsgCid = &cpResp.ChannelMsgCid
-	proposal.Payment.Vouchers = cpResp.Vouchers
+		cpResp, err := smc.api.CreatePayments(ctxPaymentSetup, porcelain.CreatePaymentsParams{
+			From:            fromAddress,
+			To:              minerOwner,
+			Value:           totalCost,
+			Duration:        duration,
+			MinerAddress:    miner,
+			CommP:           res.CommP,
+			PaymentInterval: VoucherInterval,
+			PieceSize:       types.NewBytesAmount(pieceSize),
+			ChannelExpiry:   *chainHeight.Add(types.NewBlockHeight(duration + ChannelExpiryInterval)),
+			GasPrice:        types.NewAttoFIL(big.NewInt(CreateChannelGasPrice)),
+			GasLimit:        types.NewGasUnits(CreateChannelGasLimit),
+		})
+		if err != nil {
+			return nil, errors.Wrap(err, "error creating payment")
+		}
+
+		proposal.Payment.Channel = cpResp.Channel
+		proposal.Payment.PayChActor = address.PaymentBrokerAddress
+		proposal.Payment.ChannelMsgCid = &cpResp.ChannelMsgCid
+		proposal.Payment.Vouchers = cpResp.Vouchers
+	}
 
 	signedProposal, err := proposal.NewSignedProposal(fromAddress, smc.api)
 	if err != nil {
@@ -209,7 +231,7 @@ func (smc *Client) ProposeDeal(ctx context.Context, miner address.Address, data 
 
 	// Note: currently the miner requests the data out of band
 
-	if err := smc.recordResponse(&response, miner, proposal); err != nil {
+	if err := smc.recordResponse(ctx, &response, miner, proposal); err != nil {
 		return nil, errors.Wrap(err, "failed to track response")
 	}
 	smc.log.Debugf("proposed deal for: %s, %v\n", miner.String(), proposal)
@@ -217,7 +239,7 @@ func (smc *Client) ProposeDeal(ctx context.Context, miner address.Address, data 
 	return &response, nil
 }
 
-func (smc *Client) recordResponse(resp *storagedeal.Response, miner address.Address, p *storagedeal.Proposal) error {
+func (smc *Client) recordResponse(ctx context.Context, resp *storagedeal.Response, miner address.Address, p *storagedeal.Proposal) error {
 	proposalCid, err := convert.ToCid(p)
 	if err != nil {
 		return errors.New("failed to get cid of proposal")
@@ -225,9 +247,12 @@ func (smc *Client) recordResponse(resp *storagedeal.Response, miner address.Addr
 	if !proposalCid.Equals(resp.ProposalCid) {
 		return fmt.Errorf("cids not equal %s %s", proposalCid, resp.ProposalCid)
 	}
-	storageDeal := smc.api.DealGet(proposalCid)
-	if storageDeal != nil {
+	_, err = smc.api.DealGet(ctx, proposalCid)
+	if err == nil {
 		return fmt.Errorf("deal [%s] is already in progress", proposalCid.String())
+	}
+	if err != porcelain.ErrDealNotFound {
+		return errors.Wrapf(err, "failed to check for existing deal: %s", proposalCid.String())
 	}
 
 	return smc.api.DealPut(&storagedeal.Deal{
@@ -250,23 +275,17 @@ func (smc *Client) checkDealResponse(ctx context.Context, resp *storagedeal.Resp
 	}
 }
 
-func (smc *Client) minerForProposal(c cid.Cid) (address.Address, error) {
-	storageDeal := smc.api.DealGet(c)
-	if storageDeal == nil {
-		return address.Undef, fmt.Errorf("no such proposal by cid: %s", c)
+func (smc *Client) minerForProposal(ctx context.Context, c cid.Cid) (address.Address, error) {
+	storageDeal, err := smc.api.DealGet(ctx, c)
+	if err != nil {
+		return address.Undef, errors.Wrapf(err, "failed to fetch deal: %s", c)
 	}
-
 	return storageDeal.Miner, nil
-}
-
-// GetBlockTime returns the blocktime this node is configured with.
-func (smc *Client) GetBlockTime() time.Duration {
-	return smc.blockTime
 }
 
 // QueryDeal queries an in-progress proposal.
 func (smc *Client) QueryDeal(ctx context.Context, proposalCid cid.Cid) (*storagedeal.Response, error) {
-	mineraddr, err := smc.minerForProposal(proposalCid)
+	mineraddr, err := smc.minerForProposal(ctx, proposalCid)
 	if err != nil {
 		return nil, err
 	}
@@ -286,13 +305,13 @@ func (smc *Client) QueryDeal(ctx context.Context, proposalCid cid.Cid) (*storage
 	return &resp, nil
 }
 
-func (smc *Client) isMaybeDupDeal(p *storagedeal.Proposal) bool {
-	deals, err := smc.api.DealsLs()
+func (smc *Client) isMaybeDupDeal(ctx context.Context, p *storagedeal.Proposal) bool {
+	dealsCh, err := smc.api.DealsLs(ctx)
 	if err != nil {
 		return false
 	}
-	for _, d := range deals {
-		if d.Miner == p.MinerAddress && d.Proposal.PieceRef.Equals(p.PieceRef) {
+	for d := range dealsCh {
+		if d.Deal.Miner == p.MinerAddress && d.Deal.Proposal.PieceRef.Equals(p.PieceRef) {
 			return true
 		}
 	}
@@ -300,30 +319,12 @@ func (smc *Client) isMaybeDupDeal(p *storagedeal.Proposal) bool {
 }
 
 // LoadVouchersForDeal loads vouchers from disk for a given deal
-func (smc *Client) LoadVouchersForDeal(dealCid cid.Cid) ([]*paymentbroker.PaymentVoucher, error) {
-	storageDeal := smc.api.DealGet(dealCid)
-	if storageDeal == nil {
-		return []*paymentbroker.PaymentVoucher{}, fmt.Errorf("could not retrieve deal with proposal CID %s", dealCid)
+func (smc *Client) LoadVouchersForDeal(ctx context.Context, dealCid cid.Cid) ([]*types.PaymentVoucher, error) {
+	storageDeal, err := smc.api.DealGet(ctx, dealCid)
+	if err != nil {
+		return []*types.PaymentVoucher{}, errors.Wrapf(err, "could not retrieve deal with proposal CID %s", dealCid)
 	}
 	return storageDeal.Proposal.Payment.Vouchers, nil
-}
-
-func (smc *Client) getSectorSize(ctx context.Context) (uint64, error) {
-	var proofsMode types.ProofsMode
-	values, err := smc.api.MessageQuery(ctx, address.Address{}, address.StorageMarketAddress, "getProofsMode")
-	if err != nil {
-		return 0, errors.Wrap(err, "'getProofsMode' query message failed")
-	}
-
-	if err := cbor.DecodeInto(values[0], &proofsMode); err != nil {
-		return 0, errors.Wrap(err, "could not convert query message result to Mode")
-	}
-
-	sectorSizeEnum := types.OneKiBSectorSize
-	if proofsMode == types.LiveProofsMode {
-		sectorSizeEnum = types.TwoHundredFiftySixMiBSectorSize
-	}
-	return proofs.GetMaxUserBytesPerStagedSector(sectorSizeEnum)
 }
 
 // MakeProtocolRequest makes a request and expects a response from the host using the given protocol.

@@ -1,11 +1,9 @@
 package types
 
-// SectorSize is the amount of bytes in a sector. This amount will be slightly
-// greater than the number of user bytes which can be written to a sector due to
-// bit-padding.
-type SectorSize uint64
+// OneKiBSectorSize contain 1024 bytes after sealing. These sectors are used
+// when the network is in TestProofsMode.
+var OneKiBSectorSize = NewBytesAmount(1024)
 
-const (
-	OneKiBSectorSize = SectorSize(iota)
-	TwoHundredFiftySixMiBSectorSize
-)
+// TwoHundredFiftySixMiBSectorSize contain 256MiB after sealing. These sectors
+// are used when the network is in LiveProofsMode.
+var TwoHundredFiftySixMiBSectorSize = NewBytesAmount(1 << 28)

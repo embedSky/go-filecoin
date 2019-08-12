@@ -33,7 +33,7 @@ var chainHeadCmd = &cmds.Command{
 		if err != nil {
 			return err
 		}
-		return re.Emit(head.ToSortedCidSet())
+		return re.Emit(head.Key())
 	},
 	Type: []cid.Cid{},
 	Encoders: cmds.EncoderMap{
@@ -66,7 +66,7 @@ var chainLsCmd = &cmds.Command{
 			if err != nil {
 				return err
 			}
-			if len(iter.Value()) == 0 {
+			if !iter.Value().Defined() {
 				panic("tipsets from this iterator should have at least one member")
 			}
 			if err := re.Emit(iter.Value().ToSlice()); err != nil {
@@ -93,7 +93,7 @@ var chainLsCmd = &cmds.Command{
 					output.WriteString("\t")
 					output.WriteString(strconv.FormatUint(uint64(block.Height), 10))
 					output.WriteString("\t")
-					output.WriteString(strconv.Itoa(len(block.Messages)))
+					output.WriteString(block.Messages.String())
 				} else {
 					output.WriteString(block.Cid().String())
 				}

@@ -2,13 +2,13 @@ package repo
 
 import (
 	"github.com/ipfs/go-datastore"
-	"github.com/ipfs/go-ipfs-keystore"
+	keystore "github.com/ipfs/go-ipfs-keystore"
 
 	"github.com/filecoin-project/go-filecoin/config"
 )
 
-// Version is the current repo version that we require for a valid repo.
-const Version uint = 1
+// Version is the version of repo schema that this code understands.
+const Version uint = 2
 
 // Datastore is the datastore interface provided by the repo
 type Datastore interface {
@@ -43,13 +43,12 @@ type Repo interface {
 	// APIAddr returns the address of the running API.
 	APIAddr() (string, error)
 
+	// Version returns the current repo version.
 	Version() uint
 
-	// StagingDir is used to store staged sectors.
-	StagingDir() string
+	// Path returns the repo path.
+	Path() (string, error)
 
-	// SealedDir is used to store sealed sectors.
-	SealedDir() string
-
+	// Close shuts down the repo.
 	Close() error
 }

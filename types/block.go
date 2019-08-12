@@ -1,10 +1,8 @@
 package types
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"sort"
 
 	"github.com/ipfs/go-cid"
 	cbor "github.com/ipfs/go-ipld-cbor"
@@ -28,7 +26,7 @@ type Block struct {
 	// Parents is the set of parents this block was based on. Typically one,
 	// but can be several in the case where there were multiple winning ticket-
 	// holders for an epoch.
-	Parents SortedCidSet `json:"parents"`
+	Parents TipSetKey `json:"parents"`
 
 	// ParentWeight is the aggregate chain weight of the parent set.
 	ParentWeight Uint64 `json:"parentWeight"`
@@ -41,18 +39,21 @@ type Block struct {
 
 	// Messages is the set of messages included in this block
 	// TODO: should be a merkletree-ish thing
-	Messages []*SignedMessage `json:"messages"`
+	Messages cid.Cid `json:"messages,omitempty" refmt:",omitempty"`
 
 	// StateRoot is a cid pointer to the state tree after application of the
 	// transactions state transitions.
 	StateRoot cid.Cid `json:"stateRoot,omitempty" refmt:",omitempty"`
 
 	// MessageReceipts is a set of receipts matching to the sending of the `Messages`.
-	MessageReceipts []*MessageReceipt `json:"messageReceipts"`
+	MessageReceipts cid.Cid `json:"messageReceipts,omitempty" refmt:",omitempty"`
 
 	// Proof is a proof of spacetime generated using the hash of the previous ticket as
 	// a challenge
 	Proof PoStProof `json:"proof"`
+
+	// The timestamp, in seconds since the Unix epoch, at which this block was created.
+	Timestamp Uint64 `json:"timestamp"`
 
 	cachedCid cid.Cid
 
@@ -94,11 +95,6 @@ func (b *Block) Cid() cid.Cid {
 	}
 
 	return b.cachedCid
-}
-
-// IsParentOf returns true if the argument is a parent of the receiver.
-func (b Block) IsParentOf(c Block) bool {
-	return c.Parents.Has(b.Cid())
 }
 
 // ToNode converts the Block to an IPLD node.
@@ -145,11 +141,4 @@ func (b *Block) Score() uint64 {
 // Equals returns true if the Block is equal to other.
 func (b *Block) Equals(other *Block) bool {
 	return b.Cid().Equals(other.Cid())
-}
-
-// SortBlocks sorts a slice of blocks in the canonical order (by min tickets)
-func SortBlocks(blks []*Block) {
-	sort.Slice(blks, func(i, j int) bool {
-		return bytes.Compare(blks[i].Ticket, blks[j].Ticket) == -1
-	})
 }

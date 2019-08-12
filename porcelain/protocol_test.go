@@ -2,6 +2,7 @@ package porcelain_test
 
 import (
 	"context"
+	"time"
 
 	"github.com/filecoin-project/go-filecoin/address"
 	"github.com/filecoin-project/go-filecoin/porcelain"
@@ -12,13 +13,15 @@ import (
 	"testing"
 )
 
+const protocolTestParamBlockTime = time.Second
+
 type testProtocolParamsPlumbing struct {
-	assert           *assert.Assertions
+	testing          *testing.T
 	autoSealInterval uint
 }
 
 func (tppp *testProtocolParamsPlumbing) ConfigGet(path string) (interface{}, error) {
-	tppp.assert.Equal("mining.autoSealIntervalSeconds", path)
+	assert.Equal(tppp.testing, "mining.autoSealIntervalSeconds", path)
 	return tppp.autoSealInterval, nil
 }
 
@@ -26,27 +29,31 @@ func (tppp *testProtocolParamsPlumbing) MessageQuery(ctx context.Context, optFro
 	return [][]byte{{byte(types.TestProofsMode)}}, nil
 }
 
+func (tppp *testProtocolParamsPlumbing) BlockTime() time.Duration {
+	return protocolTestParamBlockTime
+}
+
 func TestProtocolParams(t *testing.T) {
 	t.Parallel()
 
 	t.Run("emits the a ProtocolParams object with the correct values", func(t *testing.T) {
 		t.Parallel()
-		assert := assert.New(t)
-		require := require.New(t)
 
 		plumbing := &testProtocolParamsPlumbing{
-			assert:           assert,
+			testing:          t,
 			autoSealInterval: 120,
 		}
 
 		expected := &porcelain.ProtocolParams{
-			AutoSealInterval: 120,
-			SectorSizes:      []uint64{1016},
+			AutoSealInterval:     120,
+			ProofsMode:           types.TestProofsMode,
+			SupportedSectorSizes: []*types.BytesAmount{types.OneKiBSectorSize},
+			BlockTime:            protocolTestParamBlockTime,
 		}
 
 		out, err := porcelain.ProtocolParameters(context.TODO(), plumbing)
-		require.NoError(err)
+		require.NoError(t, err)
 
-		assert.Equal(expected, out)
+		assert.Equal(t, expected, out)
 	})
 }

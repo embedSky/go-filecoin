@@ -9,7 +9,7 @@ import (
 	offline "github.com/ipfs/go-ipfs-exchange-offline"
 
 	"github.com/filecoin-project/go-filecoin/address"
-	"github.com/filecoin-project/go-filecoin/proofs"
+	"github.com/filecoin-project/go-filecoin/proofs/libsectorbuilder"
 	"github.com/filecoin-project/go-filecoin/proofs/sectorbuilder"
 	"github.com/filecoin-project/go-filecoin/repo"
 	"github.com/filecoin-project/go-filecoin/types"
@@ -67,7 +67,7 @@ func (b *Builder) Build() Harness {
 		b.sealedDir = sealedDir
 	}
 
-	memRepo := repo.NewInMemoryRepoWithSectorDirectories(b.stagingDir, b.sealedDir)
+	memRepo := repo.NewInMemoryRepo()
 	blockStore := bstore.NewBlockstore(memRepo.Datastore())
 	blockService := bserv.New(blockStore, offline.Exchange(blockStore))
 	minerAddr, err := address.NewActorAddress([]byte("wombat"))
@@ -75,20 +75,20 @@ func (b *Builder) Build() Harness {
 		panic(err)
 	}
 
-	class := types.NewTestSectorClass()
+	class := types.NewSectorClass(types.OneKiBSectorSize)
 
 	sb, err := sectorbuilder.NewRustSectorBuilder(sectorbuilder.RustSectorBuilderConfig{
 		BlockService:     blockService,
 		LastUsedSectorID: 0,
-		MetadataDir:      memRepo.StagingDir(),
+		MetadataDir:      b.stagingDir,
 		MinerAddr:        minerAddr,
-		SealedSectorDir:  memRepo.SealedDir(),
+		SealedSectorDir:  b.sealedDir,
 		SectorClass:      class,
-		StagedSectorDir:  memRepo.StagingDir(),
+		StagedSectorDir:  b.stagingDir,
 	})
 	require.NoError(b.t, err)
 
-	max, err := proofs.GetMaxUserBytesPerStagedSector(class.SectorSize())
+	max := types.NewBytesAmount(libsectorbuilder.GetMaxUserBytesPerStagedSector(class.SectorSize().Uint64()))
 	require.NoError(b.t, err)
 
 	return Harness{

@@ -1,10 +1,12 @@
 package commands
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"strconv"
+	"time"
 
 	"github.com/ipfs/go-cid"
 	"github.com/ipfs/go-ipfs-cmdkit"
@@ -15,7 +17,7 @@ import (
 	"github.com/filecoin-project/go-filecoin/address"
 	"github.com/filecoin-project/go-filecoin/core"
 	"github.com/filecoin-project/go-filecoin/exec"
-	"github.com/filecoin-project/go-filecoin/plumbing/bcf"
+	"github.com/filecoin-project/go-filecoin/plumbing/cst"
 	"github.com/filecoin-project/go-filecoin/plumbing/msg"
 	"github.com/filecoin-project/go-filecoin/types"
 )
@@ -69,14 +71,9 @@ var msgSendCmd = &cmds.Command{
 			return errors.New("mal-formed value")
 		}
 
-		o := req.Options["from"]
-		var fromAddr address.Address
-		if o != nil {
-			var err error
-			fromAddr, err = address.NewFromString(o.(string))
-			if err != nil {
-				return errors.Wrap(err, "invalid from address")
-			}
+		fromAddr, err := fromAddrOrDefault(req, env)
+		if err != nil {
+			return err
 		}
 
 		gasPrice, gasLimit, preview, err := parseGasOptions(req)
@@ -106,7 +103,7 @@ var msgSendCmd = &cmds.Command{
 			})
 		}
 
-		c, err := GetPorcelainAPI(env).MessageSendWithDefaultAddress(
+		c, err := GetPorcelainAPI(env).MessageSend(
 			req.Context,
 			fromAddr,
 			target,
@@ -156,6 +153,7 @@ var msgWaitCmd = &cmds.Command{
 		cmdkit.BoolOption("message", "Print the whole message").WithDefault(true),
 		cmdkit.BoolOption("receipt", "Print the whole message receipt").WithDefault(true),
 		cmdkit.BoolOption("return", "Print the return value from the receipt").WithDefault(false),
+		cmdkit.StringOption("timeout", "Maximum time to wait for message. e.g., 300ms, 1.5h, 2h45m.").WithDefault("10m"),
 	},
 	Run: func(req *cmds.Request, re cmds.ResponseEmitter, env cmds.Environment) error {
 		msgCid, err := cid.Parse(req.Arguments[0])
@@ -166,10 +164,19 @@ var msgWaitCmd = &cmds.Command{
 		fmt.Printf("waiting for: %s\n", req.Arguments[0])
 
 		found := false
-		err = GetPorcelainAPI(env).MessageWait(req.Context, msgCid, func(blk *types.Block, msg *types.SignedMessage, receipt *types.MessageReceipt) error {
+
+		timeoutDuration, err := time.ParseDuration(req.Options["timeout"].(string))
+		if err != nil {
+			return errors.Wrap(err, "Invalid timeout string")
+		}
+
+		ctx, cancel := context.WithTimeout(req.Context, timeoutDuration)
+		defer cancel()
+
+		err = GetPorcelainAPI(env).MessageWait(ctx, msgCid, func(blk *types.Block, msg *types.SignedMessage, receipt *types.MessageReceipt) error {
 			found = true
 			sig, err := GetPorcelainAPI(env).ActorGetSignature(req.Context, msg.To, msg.Method)
-			if err != nil && err != bcf.ErrNoMethod && err != bcf.ErrNoActorImpl {
+			if err != nil && err != cst.ErrNoMethod && err != cst.ErrNoActorImpl {
 				return errors.Wrap(err, "Couldn't get signature for message")
 			}
 

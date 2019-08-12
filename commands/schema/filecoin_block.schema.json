@@ -11,23 +11,11 @@
         "height": {
           "type": "string"
         },
-        "messageReceipts": {
-          "items": {
-            "$ref": "#/definitions/MessageReceipt"
-          },
-          "type": [
-            "array",
-            "null"
-          ]
+          "messageReceipts": {
+	      "$ref": "#/definitions/Cid"
         },
         "messages": {
-          "items": {
-            "$ref": "#/definitions/SignedMessage"
-          },
-          "type": [
-            "array",
-            "null"
-          ]
+	    "$ref": "#/definitions/Cid"
         },
         "miner": {
           "type": "string"
@@ -48,10 +36,10 @@
           "type": "string"
         },
         "proof": {
-          "items": {
-            "type": "integer"
-          },
-          "type": "array"
+          "type": [
+            "null",
+            "string"
+          ]
         },
         "reward": {
           "type": "string"
@@ -64,6 +52,9 @@
             "string",
             "null"
           ]
+        },
+        "timestamp": {
+          "type": "string"
         }
       },
       "required": [
@@ -74,7 +65,8 @@
         "parents",
         "proof",
         "stateRoot",
-        "ticket"
+        "ticket",
+        "timestamp"
       ],
       "type": "object"
     },

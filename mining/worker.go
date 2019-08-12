@@ -9,12 +9,12 @@ import (
 	"time"
 
 	"github.com/ipfs/go-cid"
-	"github.com/ipfs/go-hamt-ipld"
 	"github.com/ipfs/go-ipfs-blockstore"
 	logging "github.com/ipfs/go-log"
 	"github.com/pkg/errors"
 
 	"github.com/filecoin-project/go-filecoin/address"
+	"github.com/filecoin-project/go-filecoin/chain"
 	"github.com/filecoin-project/go-filecoin/consensus"
 	"github.com/filecoin-project/go-filecoin/state"
 	"github.com/filecoin-project/go-filecoin/types"
@@ -22,10 +22,6 @@ import (
 )
 
 var log = logging.Logger("mining")
-
-// DefaultBlockTime is the estimated proving period time.
-// We define this so that we can fake mining in the current incomplete system.
-const DefaultBlockTime = 30 * time.Second
 
 // Output is the result of a single mining run. It has either a new
 // block or an error, mimicing the golang (retVal, error) pattern.
@@ -72,12 +68,18 @@ type MessageApplier interface {
 	ApplyMessagesAndPayRewards(ctx context.Context, st state.Tree, vms vm.StorageMap, messages []*types.SignedMessage, minerOwnerAddr address.Address, bh *types.BlockHeight, ancestors []types.TipSet) (consensus.ApplyMessagesResponse, error)
 }
 
+type workerPorcelainAPI interface {
+	BlockTime() time.Duration
+}
+
 // DefaultWorker runs a mining job.
 type DefaultWorker struct {
+	api workerPorcelainAPI
+
 	createPoSTFunc DoSomeWorkFunc
 	minerAddr      address.Address
 	minerOwnerAddr address.Address
-	minerPubKey    []byte
+	minerWorker    address.Address
 	workerSigner   consensus.TicketSigner
 
 	// consensus things
@@ -88,40 +90,36 @@ type DefaultWorker struct {
 	// core filecoin things
 	messageSource MessageSource
 	processor     MessageApplier
+	messageStore  chain.MessageWriter // nolint: structcheck
 	powerTable    consensus.PowerTableView
 	blockstore    blockstore.Blockstore
-	cstore        *hamt.CborIpldStore
-	blockTime     time.Duration
+}
+
+// WorkerParameters use for NewDefaultWorker parameters
+type WorkerParameters struct {
+	API workerPorcelainAPI
+
+	MinerAddr      address.Address
+	MinerOwnerAddr address.Address
+	MinerWorker    address.Address
+	WorkerSigner   consensus.TicketSigner
+
+	// consensus things
+	GetStateTree GetStateTree
+	GetWeight    GetWeight
+	GetAncestors GetAncestors
+
+	// core filecoin things
+	MessageSource MessageSource
+	Processor     MessageApplier
+	PowerTable    consensus.PowerTableView
+	MessageStore  chain.MessageWriter
+	Blockstore    blockstore.Blockstore
 }
 
 // NewDefaultWorker instantiates a new Worker.
-func NewDefaultWorker(messageSource MessageSource,
-	getStateTree GetStateTree,
-	getWeight GetWeight,
-	getAncestors GetAncestors,
-	processor MessageApplier,
-	powerTable consensus.PowerTableView,
-	bs blockstore.Blockstore,
-	cst *hamt.CborIpldStore,
-	miner address.Address,
-	minerOwner address.Address,
-	minerPubKey []byte,
-	workerSigner consensus.TicketSigner,
-	bt time.Duration) *DefaultWorker {
-
-	w := NewDefaultWorkerWithDeps(messageSource,
-		getStateTree,
-		getWeight,
-		getAncestors,
-		processor,
-		powerTable,
-		bs,
-		cst,
-		miner,
-		minerOwner,
-		minerPubKey,
-		workerSigner,
-		bt,
+func NewDefaultWorker(parameters WorkerParameters) *DefaultWorker {
+	w := NewDefaultWorkerWithDeps(parameters,
 		func() {})
 
 	// TODO: create real PoST.
@@ -132,35 +130,23 @@ func NewDefaultWorker(messageSource MessageSource,
 }
 
 // NewDefaultWorkerWithDeps instantiates a new Worker with custom functions.
-func NewDefaultWorkerWithDeps(messageSource MessageSource,
-	getStateTree GetStateTree,
-	getWeight GetWeight,
-	getAncestors GetAncestors,
-	processor MessageApplier,
-	powerTable consensus.PowerTableView,
-	bs blockstore.Blockstore,
-	cst *hamt.CborIpldStore,
-	miner address.Address,
-	minerOwner address.Address,
-	minerPubKey []byte,
-	workerSigner consensus.TicketSigner,
-	bt time.Duration,
+func NewDefaultWorkerWithDeps(parameters WorkerParameters,
 	createPoST DoSomeWorkFunc) *DefaultWorker {
 	return &DefaultWorker{
-		getStateTree:   getStateTree,
-		getWeight:      getWeight,
-		getAncestors:   getAncestors,
-		messageSource:  messageSource,
-		processor:      processor,
-		powerTable:     powerTable,
-		blockstore:     bs,
-		cstore:         cst,
+		api:            parameters.API,
+		getStateTree:   parameters.GetStateTree,
+		getWeight:      parameters.GetWeight,
+		getAncestors:   parameters.GetAncestors,
+		messageSource:  parameters.MessageSource,
+		messageStore:   parameters.MessageStore,
+		processor:      parameters.Processor,
+		powerTable:     parameters.PowerTable,
+		blockstore:     parameters.Blockstore,
 		createPoSTFunc: createPoST,
-		minerAddr:      miner,
-		minerOwnerAddr: minerOwner,
-		minerPubKey:    minerPubKey,
-		blockTime:      bt,
-		workerSigner:   workerSigner,
+		minerAddr:      parameters.MinerAddr,
+		minerOwnerAddr: parameters.MinerOwnerAddr,
+		minerWorker:    parameters.MinerWorker,
+		workerSigner:   parameters.WorkerSigner,
 	}
 }
 
@@ -175,7 +161,7 @@ func (w *DefaultWorker) Mine(ctx context.Context, base types.TipSet, nullBlkCoun
 	log.Info("Worker.Mine")
 	ctx = log.Start(ctx, "Worker.Mine")
 	defer log.Finish(ctx)
-	if len(base) == 0 {
+	if !base.Defined() {
 		log.Warning("Worker.Mine returning because it can't mine on an empty tipset")
 		outCh <- Output{Err: errors.New("bad input tipset with no blocks sent to Mine()")}
 		return false
@@ -212,8 +198,8 @@ func (w *DefaultWorker) Mine(ctx context.Context, base types.TipSet, nullBlkCoun
 			log.Errorf("Worker.Mine got zero value from channel prChRead")
 			return false
 		}
-		copy(proof[:], prChRead[:])
-		ticket, err = consensus.CreateTicket(proof, w.minerPubKey, w.workerSigner)
+		proof := append(types.PoStProof{}, prChRead[:]...)
+		ticket, err = consensus.CreateTicket(proof, w.minerWorker, w.workerSigner)
 		if err != nil {
 			log.Errorf("failed to create ticket: %s", err)
 			return false
@@ -259,5 +245,5 @@ func createProof(challengeSeed types.PoStChallengeSeed, createPoST DoSomeWorkFun
 // fakeCreatePoST is the default implementation of DoSomeWorkFunc.
 // It simply sleeps for the blockTime.
 func (w *DefaultWorker) fakeCreatePoST() {
-	time.Sleep(w.blockTime)
+	time.Sleep(w.api.BlockTime())
 }

@@ -1,11 +1,11 @@
 package strgdls_test
 
 import (
+	cbor "github.com/ipfs/go-ipld-cbor"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"testing"
 
-	"github.com/filecoin-project/go-filecoin/actor/builtin/paymentbroker"
 	"github.com/filecoin-project/go-filecoin/address"
 	"github.com/filecoin-project/go-filecoin/plumbing/strgdls"
 	"github.com/filecoin-project/go-filecoin/protocol/storage/storagedeal"
@@ -38,11 +38,11 @@ func TestDealStoreRoundTrip(t *testing.T) {
 		Payer:         addressMaker(),
 		Channel:       &channelID,
 		ChannelMsgCid: &channelMessageCid,
-		Vouchers: []*paymentbroker.PaymentVoucher{{
+		Vouchers: []*types.PaymentVoucher{{
 			Channel: channelID,
 			Payer:   clientAddr,
 			Target:  minerAddr,
-			Amount:  *totalPrice,
+			Amount:  totalPrice,
 			ValidAt: *validAt,
 		}}}
 
@@ -58,6 +58,9 @@ func TestDealStoreRoundTrip(t *testing.T) {
 	proposalCid, err := convert.ToCid(proposal)
 	require.NoError(t, err)
 
+	messageCid, err := convert.ToCid("messageCid")
+	require.NoError(t, err)
+
 	storageDeal := &storagedeal.Deal{
 		Miner:    minerAddr,
 		Proposal: proposal,
@@ -65,16 +68,19 @@ func TestDealStoreRoundTrip(t *testing.T) {
 			State:       storagedeal.Accepted,
 			Message:     responseMessage,
 			ProposalCid: proposalCid,
-			ProofInfo:   &storagedeal.ProofInfo{},
+			ProofInfo:   &storagedeal.ProofInfo{CommitmentMessage: messageCid},
 			Signature:   []byte("signature"),
 		},
 	}
 
 	require.NoError(t, store.Put(storageDeal))
-	deals, err := store.Ls()
+	dealIterator, err := store.Iterator()
 	require.NoError(t, err)
 
-	retrievedDeal := deals[0]
+	dealResult := <-(*dealIterator).Next()
+	var retrievedDeal storagedeal.Deal
+	err = cbor.DecodeInto(dealResult.Value, &retrievedDeal)
+	require.NoError(t, err)
 
 	assert.Equal(t, minerAddr, retrievedDeal.Miner)
 
@@ -87,6 +93,6 @@ func TestDealStoreRoundTrip(t *testing.T) {
 	assert.Equal(t, channelID, retrievedDeal.Proposal.Payment.Vouchers[0].Channel)
 	assert.Equal(t, clientAddr, retrievedDeal.Proposal.Payment.Vouchers[0].Payer)
 	assert.Equal(t, minerAddr, retrievedDeal.Proposal.Payment.Vouchers[0].Target)
-	assert.Equal(t, *totalPrice, retrievedDeal.Proposal.Payment.Vouchers[0].Amount)
+	assert.Equal(t, totalPrice, retrievedDeal.Proposal.Payment.Vouchers[0].Amount)
 	assert.Equal(t, *validAt, retrievedDeal.Proposal.Payment.Vouchers[0].ValidAt)
 }

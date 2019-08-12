@@ -5,13 +5,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/libp2p/go-libp2p-peer"
+	"github.com/libp2p/go-libp2p-core/peer"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 
 	"github.com/filecoin-project/go-filecoin/net"
 	. "github.com/filecoin-project/go-filecoin/porcelain"
 	th "github.com/filecoin-project/go-filecoin/testhelpers"
+	"github.com/libp2p/go-libp2p/p2p/protocol/ping"
 )
 
 type ntwkPingPlumbing struct {
@@ -19,15 +19,18 @@ type ntwkPingPlumbing struct {
 	rtt  time.Duration // pinging all other ids will resolve after rtt
 }
 
-func (npp *ntwkPingPlumbing) NetworkPing(ctx context.Context, pid peer.ID) (<-chan time.Duration, error) {
+func (npp *ntwkPingPlumbing) NetworkPing(ctx context.Context, pid peer.ID) (<-chan ping.Result, error) {
 	if pid == npp.self {
 		return nil, net.ErrPingSelf
 	}
-	c := make(chan time.Duration)
+	c := make(chan ping.Result)
 
 	go func() {
 		<-time.After(npp.rtt)
-		c <- npp.rtt
+		c <- ping.Result{
+			RTT:   npp.rtt,
+			Error: nil,
+		}
 	}()
 	return c, nil
 }
@@ -40,33 +43,27 @@ func newNtwkPingPlumbing(rtt time.Duration, self peer.ID) *ntwkPingPlumbing {
 }
 
 func TestPingSuccess(t *testing.T) {
-	require := require.New(t)
-	assert := assert.New(t)
-	self := th.RequireRandomPeerID(require)
+	self := th.RequireRandomPeerID(t)
 	plumbing := newNtwkPingPlumbing(100*time.Millisecond, self)
-	pid := th.RequireRandomPeerID(require)
+	pid := th.RequireRandomPeerID(t)
 	ctx := context.Background()
 
-	assert.NoError(PingMinerWithTimeout(ctx, pid, time.Second, plumbing))
+	assert.NoError(t, PingMinerWithTimeout(ctx, pid, time.Second, plumbing))
 }
 
 func TestPingSelfFails(t *testing.T) {
-	require := require.New(t)
-	assert := assert.New(t)
-	self := th.RequireRandomPeerID(require)
+	self := th.RequireRandomPeerID(t)
 	plumbing := newNtwkPingPlumbing(100*time.Millisecond, self)
 	ctx := context.Background()
 
-	assert.Error(PingMinerWithTimeout(ctx, self, time.Second, plumbing))
+	assert.Error(t, PingMinerWithTimeout(ctx, self, time.Second, plumbing))
 }
 
 func TestPingTimeout(t *testing.T) {
-	require := require.New(t)
-	assert := assert.New(t)
-	self := th.RequireRandomPeerID(require)
+	self := th.RequireRandomPeerID(t)
 	plumbing := newNtwkPingPlumbing(300*time.Millisecond, self)
-	pid := th.RequireRandomPeerID(require)
+	pid := th.RequireRandomPeerID(t)
 	ctx := context.Background()
 
-	assert.Error(PingMinerWithTimeout(ctx, pid, 100*time.Millisecond, plumbing))
+	assert.Error(t, PingMinerWithTimeout(ctx, pid, 100*time.Millisecond, plumbing))
 }

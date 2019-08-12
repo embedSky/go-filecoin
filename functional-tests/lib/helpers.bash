@@ -43,7 +43,10 @@ function finish {
   rm -f "${UNSEAL_PATH}"
   rm -rf "${CL_REPO_DIR}"
   rm -rf "${BOOTSTRAP_MN_REPO_DIR}"
-  rm -rf "${MN_REPO_DIR}"
+  rm -rf "${STORAGE_MN_REPO_DIR}"
+  rm -rf "${CL_SECTOR_DIR}"
+  rm -rf "${BOOTSTRAP_MN_SECTOR_DIR}"
+  rm -rf "${STORAGE_MN_SECTOR_DIR}"
 }
 
 function free_port {
@@ -59,17 +62,18 @@ function init_local_daemon {
   ./go-filecoin init \
     --auto-seal-interval-seconds="${AUTO_SEAL_INTERVAL_SECONDS}" \
     --repodir="$1" \
-    --cmdapiaddr=/ip4/127.0.0.1/tcp/"$2" \
-    --genesisfile="$3"
+    --sectordir="$2" \
+    --cmdapiaddr=/ip4/127.0.0.1/tcp/"$3" \
+    --genesisfile="$4"
 }
 
 function init_devnet_daemon {
-    if [[ "$CLUSTER" = "test" ]]; then
+    if [[ "$CLUSTER" = "staging" ]]; then
         ./go-filecoin init \
             --auto-seal-interval-seconds="${AUTO_SEAL_INTERVAL_SECONDS}" \
             --repodir="$1" \
             --cmdapiaddr=/ip4/127.0.0.1/tcp/"$2" \
-            --devnet-test \
+            --devnet-staging \
             --genesisfile="http://test.kittyhawk.wtf:8020/genesis.car"
    else
         ./go-filecoin init \
@@ -165,7 +169,7 @@ function wait_for_message_in_chain_by_method_and_sender {
 }
 
 function create_miner {
-  ./go-filecoin miner create 10 100 \
+  ./go-filecoin miner create 100 \
     --gas-limit=10000 \
     --gas-price=1 \
     --repodir="$1"

@@ -14,11 +14,13 @@ import (
 	"github.com/filecoin-project/go-filecoin/types"
 )
 
+const verifyPieceInclusionMethod = "verifyPieceInclusion"
+
 // cpPlumbing is the subset of the plumbing.API that CreatePayments uses.
 type cpPlumbing interface {
 	ChainBlockHeight() (*types.BlockHeight, error)
 	MessageQuery(ctx context.Context, optFrom, to address.Address, method string, params ...interface{}) ([][]byte, error)
-	MessageSend(ctx context.Context, from, to address.Address, value *types.AttoFIL, gasPrice types.AttoFIL, gasLimit types.GasUnits, method string, params ...interface{}) (cid.Cid, error)
+	MessageSend(ctx context.Context, from, to address.Address, value types.AttoFIL, gasPrice types.AttoFIL, gasLimit types.GasUnits, method string, params ...interface{}) (cid.Cid, error)
 	MessageWait(ctx context.Context, msgCid cid.Cid, cb func(*types.Block, *types.SignedMessage, *types.MessageReceipt) error) error
 	SignBytes(data []byte, addr address.Address) (types.Signature, error)
 }
@@ -39,6 +41,16 @@ type CreatePaymentsParams struct {
 
 	// Duration is the amount of time (in block height) the payments will cover.
 	Duration uint64
+
+	// MinerAddress is the address of the miner actor representing the payment recipient.
+	// Conditions confirming that the miner is storing the client's piece will be directed towards this actor.
+	MinerAddress address.Address
+
+	// CommP is the client's data commitment. It will be the basis of piece inclusion conditions added to the payments.
+	CommP types.CommP
+
+	// PieceSize represents the size of the user-provided piece, in bytes.
+	PieceSize *types.BytesAmount
 
 	// PaymentInterval is the time between payments (in block height)
 	PaymentInterval uint64
@@ -66,13 +78,18 @@ type CreatePaymentsReturn struct {
 	ChannelMsgCid cid.Cid
 
 	// GasAttoFIL is the amount spent on gas creating the channel
-	GasAttoFIL *types.AttoFIL
+	GasAttoFIL types.AttoFIL
 
 	// Vouchers are the payment vouchers created to pay the target at regular intervals.
-	Vouchers []*paymentbroker.PaymentVoucher
+	Vouchers []*types.PaymentVoucher
 }
 
-// CreatePayments establishes a payment channel and create multiple payments against it
+// CreatePayments establishes a payment channel and creates multiple payments against it.
+//
+// Each payment except the last will get a condition that calls verifyPieceInclusion on the recipient's miner
+// actor to ensure the storage miner is still storing the file at the time of redemption.
+// The last payment does not contain a condition so that the miner may collect payment without posting a
+// piece inclusion proof after the storage deal is complete.
 func CreatePayments(ctx context.Context, plumbing cpPlumbing, config CreatePaymentsParams) (*CreatePaymentsReturn, error) {
 	// validate
 	if config.From.Empty() {
@@ -105,7 +122,7 @@ func CreatePayments(ctx context.Context, plumbing cpPlumbing, config CreatePayme
 	response.ChannelMsgCid, err = plumbing.MessageSend(ctx,
 		config.From,
 		address.PaymentBrokerAddress,
-		&config.Value,
+		config.Value,
 		config.GasPrice,
 		config.GasLimit,
 		"createChannel",
@@ -133,53 +150,61 @@ func CreatePayments(ctx context.Context, plumbing cpPlumbing, config CreatePayme
 	intervalAsBigInt := big.NewInt(int64(config.PaymentInterval))
 	// Convert to AttoFIL, because values have to be the same type.
 	durationAsAttoFIL := types.NewAttoFIL(big.NewInt(int64(config.Duration)))
-	valuePerPayment := *config.Value.MulBigInt(intervalAsBigInt).DivCeil(durationAsAttoFIL)
+	valuePerPayment := config.Value.MulBigInt(intervalAsBigInt).DivCeil(durationAsAttoFIL)
+
+	// condition is a condition that requires that the miner has the client's piece and is currently proving on it
+	condition := &types.Predicate{
+		To:     config.MinerAddress,
+		Method: verifyPieceInclusionMethod,
+		Params: []interface{}{config.CommP[:], config.PieceSize},
+	}
 
 	// generate payments
-	response.Vouchers = []*paymentbroker.PaymentVoucher{}
+	response.Vouchers = []*types.PaymentVoucher{}
 	voucherAmount := types.ZeroAttoFIL
 	for i := 0; uint64(i+1)*config.PaymentInterval < config.Duration; i++ {
-		voucherAmount = voucherAmount.Add(&valuePerPayment)
-		if voucherAmount.GreaterThan(&config.Value) {
-			voucherAmount = &config.Value
+		voucherAmount = voucherAmount.Add(valuePerPayment)
+		if voucherAmount.GreaterThan(config.Value) {
+			voucherAmount = config.Value
 		}
 
 		validAt := currentHeight.Add(types.NewBlockHeight(uint64(i+1) * config.PaymentInterval))
-		err = createPayment(ctx, plumbing, response, voucherAmount, validAt)
+		err = createPayment(ctx, plumbing, response, voucherAmount, validAt, condition)
 		if err != nil {
 			return response, err
 		}
 	}
 
-	if voucherAmount.LessThan(&config.Value) {
-		validAt := currentHeight.Add(types.NewBlockHeight(config.Duration))
-		err = createPayment(ctx, plumbing, response, &config.Value, validAt)
-		if err != nil {
-			return response, err
-		}
+	// create last payment
+	validAt := currentHeight.Add(types.NewBlockHeight(config.Duration))
+	err = createPayment(ctx, plumbing, response, config.Value, validAt, nil)
+	if err != nil {
+		return response, err
 	}
 
 	return response, nil
 }
 
-func createPayment(ctx context.Context, plumbing cpPlumbing, response *CreatePaymentsReturn, amount *types.AttoFIL, validAt *types.BlockHeight) error {
+func createPayment(ctx context.Context, plumbing cpPlumbing, response *CreatePaymentsReturn, amount types.AttoFIL, validAt *types.BlockHeight, condition *types.Predicate) error {
 	ret, err := plumbing.MessageQuery(ctx,
 		response.From,
 		address.PaymentBrokerAddress,
 		"voucher",
 		response.Channel,
 		amount,
-		validAt)
+		validAt,
+		condition,
+	)
 	if err != nil {
 		return err
 	}
 
-	var voucher paymentbroker.PaymentVoucher
+	var voucher types.PaymentVoucher
 	if err := cbor.DecodeInto(ret[0], &voucher); err != nil {
 		return err
 	}
 
-	sig, err := paymentbroker.SignVoucher(&voucher.Channel, amount, validAt, voucher.Payer, plumbing)
+	sig, err := paymentbroker.SignVoucher(&voucher.Channel, amount, validAt, voucher.Payer, condition, plumbing)
 	if err != nil {
 		return err
 	}

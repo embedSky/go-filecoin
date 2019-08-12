@@ -28,7 +28,7 @@ func NewMessageMaker(t *testing.T, keys []KeyInfo) *MessageMaker {
 		addresses[i] = addr
 	}
 
-	return &MessageMaker{*ZeroAttoFIL, NewGasUnits(0), &signer, 0, t}
+	return &MessageMaker{ZeroAttoFIL, NewGasUnits(0), &signer, 0, t}
 }
 
 // Addresses returns the addresses for which this maker can sign messages.
@@ -51,10 +51,19 @@ func (mm *MessageMaker) NewSignedMessage(from address.Address, nonce uint64) *Si
 		from,
 		to,
 		nonce,
-		NewAttoFILFromFIL(0),
+		ZeroAttoFIL,
 		"method"+fmt.Sprintf("%d", seq),
 		[]byte("params"))
 	signed, err := NewSignedMessage(*msg, mm.signer, mm.DefaultGasPrice, mm.DefaultGasUnits)
 	require.NoError(mm.t, err)
 	return signed
+}
+
+// EmptyReceipts returns a slice of n empty receipts.
+func EmptyReceipts(n int) []*MessageReceipt {
+	out := make([]*MessageReceipt, n)
+	for i := 0; i < n; i++ {
+		out[i] = &MessageReceipt{}
+	}
+	return out
 }

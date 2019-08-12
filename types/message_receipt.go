@@ -1,6 +1,9 @@
 package types
 
 import (
+	"encoding/json"
+	"fmt"
+
 	cbor "github.com/ipfs/go-ipld-cbor"
 )
 
@@ -19,5 +22,15 @@ type MessageReceipt struct {
 	Return [][]byte `json:"return"`
 
 	// GasAttoFIL Charge is the actual amount of FIL transferred from the sender to the miner for processing the message
-	GasAttoFIL *AttoFIL `json:"gasAttoFIL"`
+	GasAttoFIL AttoFIL `json:"gasAttoFIL"`
+}
+
+func (mr *MessageReceipt) String() string {
+	errStr := "(error encoding MessageReceipt)"
+
+	js, err := json.MarshalIndent(mr, "", "  ")
+	if err != nil {
+		return errStr
+	}
+	return fmt.Sprintf("MessageReceipt: %s", string(js))
 }

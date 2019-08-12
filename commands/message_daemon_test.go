@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 
+	"github.com/ipfs/go-cid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -77,36 +77,36 @@ func TestMessageWait(t *testing.T) {
 	defer d.ShutdownSuccess()
 
 	t.Run("[success] transfer only", func(t *testing.T) {
-		assert := assert.New(t)
-
-		msg := d.RunSuccess(
-			"message", "send",
+		msg := d.RunSuccess("message", "send",
 			"--from", fixtures.TestAddresses[0],
-			"--gas-price", "1", "--gas-limit", "300",
-			"--value=10",
+			"--gas-price", "1",
+			"--gas-limit", "300",
 			fixtures.TestAddresses[1],
 		)
+		msgcid := msg.ReadStdoutTrimNewlines()
 
-		msgcid := strings.Trim(msg.ReadStdout(), "\n")
-
-		var wg sync.WaitGroup
-		wg.Add(1)
-		go func() {
-			wait := d.RunSuccess(
-				"message", "wait",
-				"--message=false",
-				"--receipt=false",
-				"--return",
-				msgcid,
-			)
-			// nothing should be printed, as there is no return value
-			assert.Equal("", wait.ReadStdout())
-			wg.Done()
-		}()
+		// Fail with timeout before the message has been mined
+		d.RunFail(
+			"deadline exceeded",
+			"message", "wait",
+			"--message=false",
+			"--receipt=false",
+			"--timeout=100ms",
+			"--return",
+			msgcid,
+		)
 
 		d.RunSuccess("mining once")
 
-		wg.Wait()
+		wait := d.RunSuccess(
+			"message", "wait",
+			"--message=false",
+			"--receipt=false",
+			"--timeout=1m",
+			"--return",
+			msgcid,
+		)
+		assert.Equal(t, "", wait.ReadStdout())
 	})
 }
 
@@ -124,7 +124,7 @@ func TestMessageSendBlockGasLimit(t *testing.T) {
 
 	doubleTheBlockGasLimit := strconv.Itoa(int(types.BlockGasLimit) * 2)
 	halfTheBlockGasLimit := strconv.Itoa(int(types.BlockGasLimit) / 2)
-	result := struct{ Messages []interface{} }{}
+	result := struct{ Messages cid.Cid }{}
 
 	t.Run("when the gas limit is above the block limit, the message fails", func(t *testing.T) {
 		d.RunFail("block gas limit",
@@ -143,7 +143,7 @@ func TestMessageSendBlockGasLimit(t *testing.T) {
 
 		blockCid := d.RunSuccess("mining", "once").ReadStdoutTrimNewlines()
 
-		blockInfo := d.RunSuccess("show", "block", blockCid, "--enc", "json").ReadStdoutTrimNewlines()
+		blockInfo := d.RunSuccess("show", "header", blockCid, "--enc", "json").ReadStdoutTrimNewlines()
 
 		require.NoError(t, json.Unmarshal([]byte(blockInfo), &result))
 		assert.NotEmpty(t, result.Messages, "msg under the block gas limit passes validation and is run in the block")
@@ -157,8 +157,6 @@ func TestMessageStatus(t *testing.T) {
 	defer d.ShutdownSuccess()
 
 	t.Run("queue then on chain", func(t *testing.T) {
-		assert := assert.New(t)
-
 		msg := d.RunSuccess(
 			"message", "send",
 			"--from", fixtures.TestAddresses[0],
@@ -170,23 +168,23 @@ func TestMessageStatus(t *testing.T) {
 		msgcid := strings.Trim(msg.ReadStdout(), "\n")
 		status := d.RunSuccess("message", "status", msgcid).ReadStdout()
 
-		assert.Contains(status, "In outbox")
-		assert.Contains(status, "In mpool")
-		assert.NotContains(status, "On chain") // not found on chain (yet)
-		assert.Contains(status, "1234")        // the "value"
+		assert.Contains(t, status, "In outbox")
+		assert.Contains(t, status, "In mpool")
+		assert.NotContains(t, status, "On chain") // not found on chain (yet)
+		assert.Contains(t, status, "1234")        // the "value"
 
 		d.RunSuccess("mining once")
 
 		status = d.RunSuccess("message", "status", msgcid).ReadStdout()
 
-		assert.NotContains(status, "In outbox")
-		assert.NotContains(status, "In mpool")
-		assert.Contains(status, "On chain")
-		assert.Contains(status, "1234") // the "value"
+		assert.NotContains(t, status, "In outbox")
+		assert.NotContains(t, status, "In mpool")
+		assert.Contains(t, status, "On chain")
+		assert.Contains(t, status, "1234") // the "value"
 
 		status = d.RunSuccess("message", "status", "QmPVkJMTeRC6iBByPWdrRkD3BE5UXsj5HPzb4kPqL186mS").ReadStdout()
-		assert.NotContains(status, "In outbox")
-		assert.NotContains(status, "In mpool")
-		assert.NotContains(status, "On chain")
+		assert.NotContains(t, status, "In outbox")
+		assert.NotContains(t, status, "In mpool")
+		assert.NotContains(t, status, "On chain")
 	})
 }

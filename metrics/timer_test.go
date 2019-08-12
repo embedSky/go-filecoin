@@ -12,28 +12,25 @@ import (
 func TestTimerSimple(t *testing.T) {
 	tf.BadUnitTestWithSideEffects(t)
 
-	assert := assert.New(t)
-
 	ctx := context.Background()
 
-	testTimer := NewTimer("testName", "testDesc")
+	testTimer := NewTimerMs("testName", "testDesc")
 	// some view state is kept around after tests exit, doing this to clean that up.
 	// e.g. view will remain registered after a test exits.
 	defer view.Unregister(testTimer.view)
 
-	assert.Equal("testName", testTimer.view.Name)
-	assert.Equal("testDesc", testTimer.view.Description)
+	assert.Equal(t, "testName", testTimer.view.Name)
+	assert.Equal(t, "testDesc", testTimer.view.Description)
 
 	sw := testTimer.Start(ctx)
 	sw.Stop(ctx)
-	assert.NotEqual(0, sw.start)
+	assert.NotEqual(t, 0, sw.start)
 
 }
 
 func TestDuplicateTimersPanics(t *testing.T) {
 	tf.BadUnitTestWithSideEffects(t)
 
-	assert := assert.New(t)
 	ctx := context.Background()
 
 	defer func() {
@@ -43,34 +40,32 @@ func TestDuplicateTimersPanics(t *testing.T) {
 		// we pass
 	}()
 
-	NewTimer("testName", "testDesc")
-	testTimer := NewTimer("testName", "testDesc")
-	assert.Equal("testName", testTimer.view.Name)
-	assert.Equal("testDesc", testTimer.view.Description)
+	NewTimerMs("testName", "testDesc")
+	testTimer := NewTimerMs("testName", "testDesc")
+	assert.Equal(t, "testName", testTimer.view.Name)
+	assert.Equal(t, "testDesc", testTimer.view.Description)
 
 	sw := testTimer.Start(ctx)
 	sw.Stop(ctx)
-	assert.NotEqual(0, sw.start)
+	assert.NotEqual(t, 0, sw.start)
 
 }
 
 func TestMultipleTimers(t *testing.T) {
 	tf.BadUnitTestWithSideEffects(t)
 
-	assert := assert.New(t)
-
 	ctx1 := context.Background()
 	ctx2 := context.Background()
 
-	tt1 := NewTimer("tt1", "ttd1")
-	tt2 := NewTimer("tt2", "ttd2")
+	tt1 := NewTimerMs("tt1", "ttd1")
+	tt2 := NewTimerMs("tt2", "ttd2")
 
 	sw1 := tt1.Start(ctx1)
 	sw2 := tt2.Start(ctx2)
 
 	sw1.Stop(ctx1)
-	assert.NotEqual(0, sw1.start)
+	assert.NotEqual(t, 0, sw1.start)
 	sw2.Stop(ctx2)
-	assert.NotEqual(0, sw2.start)
+	assert.NotEqual(t, 0, sw2.start)
 
 }

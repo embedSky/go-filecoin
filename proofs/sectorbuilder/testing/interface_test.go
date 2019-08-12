@@ -1,6 +1,7 @@
 package testing
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"io/ioutil"
@@ -9,10 +10,11 @@ import (
 	"testing"
 	"time"
 
-	cid "github.com/ipfs/go-cid"
+	"github.com/ipfs/go-cid"
 
 	"github.com/filecoin-project/go-filecoin/proofs"
 	"github.com/filecoin-project/go-filecoin/proofs/sectorbuilder"
+	"github.com/filecoin-project/go-filecoin/proofs/verification"
 	tf "github.com/filecoin-project/go-filecoin/testhelpers/testflags"
 	"github.com/filecoin-project/go-filecoin/types"
 
@@ -68,7 +70,7 @@ func TestSectorBuilder(t *testing.T) {
 		piecesToSeal := 10
 		for i := 0; i < piecesToSeal; i++ {
 			go func() {
-				_, pieceCid, err := h.AddPiece(context.Background(), RequireRandomBytes(t, h.MaxBytesPerSector/3))
+				_, pieceCid, err := h.AddPiece(context.Background(), RequireRandomBytes(t, 1))
 				if err != nil {
 					errs <- err
 				} else {
@@ -150,7 +152,7 @@ func TestSectorBuilder(t *testing.T) {
 		piecesToSeal := 5
 		for i := 0; i < piecesToSeal; i++ {
 			go func() {
-				_, pieceCid, err := h.AddPiece(context.Background(), RequireRandomBytes(t, h.MaxBytesPerSector))
+				_, pieceCid, err := h.AddPiece(context.Background(), RequireRandomBytes(t, h.MaxBytesPerSector.Uint64()))
 				if err != nil {
 					errs <- err
 				} else {
@@ -187,7 +189,7 @@ func TestSectorBuilder(t *testing.T) {
 		h := NewBuilder(t).Build()
 		defer h.Close()
 
-		inputBytes := RequireRandomBytes(t, h.MaxBytesPerSector)
+		inputBytes := RequireRandomBytes(t, h.MaxBytesPerSector.Uint64())
 		ref, size, reader, err := h.CreateAddPieceArgs(inputBytes)
 		require.NoError(t, err)
 
@@ -203,7 +205,7 @@ func TestSectorBuilder(t *testing.T) {
 			require.NoError(t, val.SealingErr)
 			require.Equal(t, sectorID, val.SealingResult.SectorID)
 
-			res, err := (&proofs.RustVerifier{}).VerifySeal(proofs.VerifySealRequest{
+			res, err := (&verification.RustVerifier{}).VerifySeal(verification.VerifySealRequest{
 				CommD:      val.SealingResult.CommD,
 				CommR:      val.SealingResult.CommR,
 				CommRStar:  val.SealingResult.CommRStar,
@@ -239,15 +241,20 @@ func TestSectorBuilder(t *testing.T) {
 		}
 
 		hA := NewBuilder(t).StagingDir(stagingDir).SealedDir(sealedDir).Build()
-		defer hA.Close()
 
 		// holds id of each sector we expect to see sealed
 		sectorIDSet := sync.Map{}
 
-		// SectorBuilder begins polling for SectorIDA seal-status
-		sectorIDA, _, errA := hA.AddPiece(context.Background(), RequireRandomBytes(t, hA.MaxBytesPerSector-10))
+		// first SectorBuilder begins polling for SectorIDA seal-status after
+		// adding a one-byte piece
+		sectorIDA, _, errA := hA.AddPiece(context.Background(), RequireRandomBytes(t, 1))
 		require.NoError(t, errA)
 		sectorIDSet.Store(sectorIDA, true)
+
+		// destroy the first sector builder, which releases the metadata
+		// database lock and allows a new sector builder to be created using the
+		// same sectors dir
+		hA.Close()
 
 		// create new SectorBuilder which should start with a poller pre-seeded
 		// with state from previous SectorBuilder
@@ -255,8 +262,8 @@ func TestSectorBuilder(t *testing.T) {
 		defer hB.Close()
 
 		// second SectorBuilder begins polling for SectorIDB seal-status in
-		// addition to SectorIDA
-		sectorIDB, _, errB := hB.AddPiece(context.Background(), RequireRandomBytes(t, hB.MaxBytesPerSector-50))
+		// addition to SectorIDA after adding a second, one-byte piece
+		sectorIDB, _, errB := hB.AddPiece(context.Background(), RequireRandomBytes(t, 1))
 		require.NoError(t, errB)
 		sectorIDSet.Store(sectorIDB, true)
 
@@ -297,7 +304,7 @@ func TestSectorBuilder(t *testing.T) {
 		h := NewBuilder(t).Build()
 		defer h.Close()
 
-		inputBytes := RequireRandomBytes(t, h.MaxBytesPerSector)
+		inputBytes := RequireRandomBytes(t, h.MaxBytesPerSector.Uint64())
 		ref, size, reader, err := h.CreateAddPieceArgs(inputBytes)
 		require.NoError(t, err)
 
@@ -310,6 +317,18 @@ func TestSectorBuilder(t *testing.T) {
 		case val := <-h.SectorBuilder.SectorSealResults():
 			require.NoError(t, val.SealingErr)
 			require.Equal(t, sectorID, val.SealingResult.SectorID)
+
+			sres, serr := (&verification.RustVerifier{}).VerifySeal(verification.VerifySealRequest{
+				CommD:      val.SealingResult.CommD,
+				CommR:      val.SealingResult.CommR,
+				CommRStar:  val.SealingResult.CommRStar,
+				Proof:      val.SealingResult.Proof,
+				ProverID:   sectorbuilder.AddressToProverID(h.MinerAddr),
+				SectorID:   sectorbuilder.SectorIDToBytes(val.SealingResult.SectorID),
+				SectorSize: types.OneKiBSectorSize,
+			})
+			require.NoError(t, serr, "seal proof-verification produced an error")
+			require.True(t, sres.IsValid, "seal proof was not valid")
 
 			// TODO: This should be generates from some standard source of
 			// entropy, e.g. the blockchain
@@ -325,7 +344,7 @@ func TestSectorBuilder(t *testing.T) {
 			require.NoError(t, gerr)
 
 			// verify the proof-of-spacetime
-			vres, verr := (&proofs.RustVerifier{}).VerifyPoST(proofs.VerifyPoSTRequest{
+			vres, verr := (&verification.RustVerifier{}).VerifyPoSt(verification.VerifyPoStRequest{
 				ChallengeSeed: challengeSeed,
 				SortedCommRs:  sortedCommRs,
 				Faults:        gres.Faults,
@@ -335,6 +354,47 @@ func TestSectorBuilder(t *testing.T) {
 
 			require.NoError(t, verr)
 			require.True(t, vres.IsValid)
+		case <-timeout:
+			t.Fatalf("timed out waiting for seal to complete")
+		}
+	})
+
+	t.Run("PIP generation and verification", func(t *testing.T) {
+		h := NewBuilder(t).Build()
+		defer h.Close()
+
+		inputBytes := RequireRandomBytes(t, h.MaxBytesPerSector.Uint64())
+		ref, size, reader, err := h.CreateAddPieceArgs(inputBytes)
+		require.NoError(t, err)
+
+		commRes, commErr := proofs.GeneratePieceCommitment(proofs.GeneratePieceCommitmentRequest{
+			PieceReader: bytes.NewReader(inputBytes),
+			PieceSize:   types.NewBytesAmount(size),
+		})
+		require.NoError(t, commErr)
+
+		sectorID, err := h.SectorBuilder.AddPiece(context.Background(), ref, size, reader)
+		require.NoError(t, err)
+
+		timeout := time.After(MaxTimeToSealASector)
+
+		select {
+		case val := <-h.SectorBuilder.SectorSealResults():
+			require.NoError(t, val.SealingErr)
+			require.NotNil(t, val.SealingResult)
+			require.Equal(t, sectorID, val.SealingResult.SectorID)
+			require.Equal(t, 1, len(val.SealingResult.Pieces), "expected to find the single piece we added")
+			require.Equal(t, val.SealingResult.Pieces[0].CommP, commRes.CommP, "client and miner disagree on CommP")
+
+			pipRes, pipErr := (&verification.RustVerifier{}).VerifyPieceInclusionProof(verification.VerifyPieceInclusionProofRequest{
+				CommD:               val.SealingResult.CommD,
+				CommP:               val.SealingResult.Pieces[0].CommP,
+				PieceInclusionProof: val.SealingResult.Pieces[0].InclusionProof,
+				PieceSize:           types.NewBytesAmount(val.SealingResult.Pieces[0].Size),
+				SectorSize:          types.OneKiBSectorSize,
+			})
+			require.NoError(t, pipErr, "PIP verification produced an error")
+			require.True(t, pipRes.IsValid, "PIP wasn't valid")
 		case <-timeout:
 			t.Fatalf("timed out waiting for seal to complete")
 		}

@@ -17,16 +17,17 @@ import (
 
 // Config is an in memory representation of the filecoin configuration file
 type Config struct {
-	API       *APIConfig         `json:"api"`
-	Bootstrap *BootstrapConfig   `json:"bootstrap"`
-	Datastore *DatastoreConfig   `json:"datastore"`
-	Swarm     *SwarmConfig       `json:"swarm"`
-	Mining    *MiningConfig      `json:"mining"`
-	Wallet    *WalletConfig      `json:"wallet"`
-	Heartbeat *HeartbeatConfig   `json:"heartbeat"`
-	Net       string             `json:"net"`
-	Metrics   *MetricsConfig     `json:"metrics"`
-	Mpool     *MessagePoolConfig `json:"mpool"`
+	API           *APIConfig           `json:"api"`
+	Bootstrap     *BootstrapConfig     `json:"bootstrap"`
+	Datastore     *DatastoreConfig     `json:"datastore"`
+	Heartbeat     *HeartbeatConfig     `json:"heartbeat"`
+	Mining        *MiningConfig        `json:"mining"`
+	Mpool         *MessagePoolConfig   `json:"mpool"`
+	Net           string               `json:"net"`
+	Observability *ObservabilityConfig `json:"observability"`
+	SectorBase    *SectorBaseConfig    `json:"sectorbase"`
+	Swarm         *SwarmConfig         `json:"swarm"`
+	Wallet        *WalletConfig        `json:"wallet"`
 }
 
 // APIConfig holds all configuration options related to the api.
@@ -105,14 +106,14 @@ func newDefaultBootstrapConfig() *BootstrapConfig {
 type MiningConfig struct {
 	MinerAddress            address.Address `json:"minerAddress"`
 	AutoSealIntervalSeconds uint            `json:"autoSealIntervalSeconds"`
-	StoragePrice            *types.AttoFIL  `json:"storagePrice"`
+	StoragePrice            types.AttoFIL   `json:"storagePrice"`
 }
 
 func newDefaultMiningConfig() *MiningConfig {
 	return &MiningConfig{
 		MinerAddress:            address.Undef,
 		AutoSealIntervalSeconds: 120,
-		StoragePrice:            types.NewZeroAttoFIL(),
+		StoragePrice:            types.ZeroAttoFIL,
 	}
 }
 
@@ -150,6 +151,19 @@ func newDefaultHeartbeatConfig() *HeartbeatConfig {
 	}
 }
 
+// ObservabilityConfig is a container for configuration related to observables.
+type ObservabilityConfig struct {
+	Metrics *MetricsConfig `json:"metrics"`
+	Tracing *TraceConfig   `json:"tracing"`
+}
+
+func newDefaultObservabilityConfig() *ObservabilityConfig {
+	return &ObservabilityConfig{
+		Metrics: newDefaultMetricsConfig(),
+		Tracing: newDefaultTraceConfig(),
+	}
+}
+
 // MetricsConfig holds all configuration options related to node metrics.
 type MetricsConfig struct {
 	// Enabled will enable prometheus metrics when true.
@@ -168,10 +182,29 @@ func newDefaultMetricsConfig() *MetricsConfig {
 	}
 }
 
-// MetricsConfig holds all configuration options related to nodes message pool (mpool).
+// TraceConfig holds all configuration options related to enabling and exporting
+// filecoin node traces.
+type TraceConfig struct {
+	// JaegerTracingEnabled will enable exporting traces to jaeger when true.
+	JaegerTracingEnabled bool `json:"jaegerTracingEnabled"`
+	// ProbabilitySampler will sample fraction of traces, 1.0 will sample all traces.
+	ProbabilitySampler float64 `json:"probabilitySampler"`
+	// JaegerEndpoint is the URL traces are collected on.
+	JaegerEndpoint string `json:"jaegerEndpoint"`
+}
+
+func newDefaultTraceConfig() *TraceConfig {
+	return &TraceConfig{
+		JaegerEndpoint:       "http://localhost:14268/api/traces",
+		JaegerTracingEnabled: false,
+		ProbabilitySampler:   1.0,
+	}
+}
+
+// MessagePoolConfig holds all configuration options related to nodes message pool (mpool).
 type MessagePoolConfig struct {
 	// MaxPoolSize is the maximum number of pending messages will will allow in the message pool at any time
-	MaxPoolSize int `json:"maxPoolSize"`
+	MaxPoolSize uint `json:"maxPoolSize"`
 	// MaxNonceGap is the maximum nonce of a message past the last received on chain
 	MaxNonceGap types.Uint64 `json:"maxNonceGap"`
 }
@@ -183,20 +216,35 @@ func newDefaultMessagePoolConfig() *MessagePoolConfig {
 	}
 }
 
+// SectorBaseConfig holds all configuration options related to the node's
+// sector storage.
+type SectorBaseConfig struct {
+	// RootDir is the path to the root directory holding sector data.
+	// If empty the default of <homedir>/sectors is implied.
+	RootDir string `json:"rootdir"`
+}
+
+func newDefaultSectorbaseConfig() *SectorBaseConfig {
+	return &SectorBaseConfig{
+		RootDir: "",
+	}
+}
+
 // NewDefaultConfig returns a config object with all the fields filled out to
 // their default values
 func NewDefaultConfig() *Config {
 	return &Config{
-		API:       newDefaultAPIConfig(),
-		Bootstrap: newDefaultBootstrapConfig(),
-		Datastore: newDefaultDatastoreConfig(),
-		Swarm:     newDefaultSwarmConfig(),
-		Mining:    newDefaultMiningConfig(),
-		Wallet:    newDefaultWalletConfig(),
-		Heartbeat: newDefaultHeartbeatConfig(),
-		Net:       "",
-		Metrics:   newDefaultMetricsConfig(),
-		Mpool:     newDefaultMessagePoolConfig(),
+		API:           newDefaultAPIConfig(),
+		Bootstrap:     newDefaultBootstrapConfig(),
+		Datastore:     newDefaultDatastoreConfig(),
+		Swarm:         newDefaultSwarmConfig(),
+		Mining:        newDefaultMiningConfig(),
+		Wallet:        newDefaultWalletConfig(),
+		Heartbeat:     newDefaultHeartbeatConfig(),
+		Net:           "",
+		Mpool:         newDefaultMessagePoolConfig(),
+		SectorBase:    newDefaultSectorbaseConfig(),
+		Observability: newDefaultObservabilityConfig(),
 	}
 }
 

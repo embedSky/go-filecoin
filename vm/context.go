@@ -11,6 +11,7 @@ import (
 	"github.com/filecoin-project/go-filecoin/actor/builtin/account"
 	"github.com/filecoin-project/go-filecoin/address"
 	"github.com/filecoin-project/go-filecoin/exec"
+	"github.com/filecoin-project/go-filecoin/proofs/verification"
 	"github.com/filecoin-project/go-filecoin/sampling"
 	"github.com/filecoin-project/go-filecoin/state"
 	"github.com/filecoin-project/go-filecoin/types"
@@ -73,24 +74,6 @@ func (ctx *Context) Message() *types.Message {
 	return ctx.message
 }
 
-// ReadStorage reads the storage from the associated to actor.
-func (ctx *Context) ReadStorage() ([]byte, error) {
-	storage := ctx.Storage()
-
-	memory, err := storage.Get(storage.Head())
-	if err != nil {
-		if err == ErrNotFound {
-			return nil, errors.NewRevertErrorf("actor state not found at cid %s", storage.Head())
-		}
-		return nil, err
-	}
-
-	out := make([]byte, len(memory))
-	copy(out, memory)
-
-	return out, nil
-}
-
 // Charge attempts to add the given cost to the accrued gas cost of this transaction
 func (ctx *Context) Charge(cost types.GasUnits) error {
 	return ctx.gasTracker.Charge(cost)
@@ -101,26 +84,14 @@ func (ctx *Context) GasUnits() types.GasUnits {
 	return ctx.gasTracker.gasConsumedByMessage
 }
 
-// WriteStorage writes to the storage of the associated to actor.
-func (ctx *Context) WriteStorage(memory interface{}) error {
-	stage := ctx.Storage()
-
-	cid, err := stage.Put(memory)
-	if err != nil {
-		return errors.RevertErrorWrap(err, "Could not stage memory chunk")
-	}
-
-	err = stage.Commit(cid, stage.Head())
-	if err != nil {
-		return errors.RevertErrorWrap(err, "Could not commit actor memory")
-	}
-
-	return nil
-}
-
 // BlockHeight returns the block height of the block currently being processed
 func (ctx *Context) BlockHeight() *types.BlockHeight {
 	return ctx.blockHeight
+}
+
+// MyBalance returns the balance of the associated actor.
+func (ctx *Context) MyBalance() types.AttoFIL {
+	return ctx.to.Balance
 }
 
 // IsFromAccountActor returns true if the message is being sent by an account actor.
@@ -130,7 +101,7 @@ func (ctx *Context) IsFromAccountActor() bool {
 
 // Send sends a message to another actor.
 // This method assumes to be called from inside the `to` actor.
-func (ctx *Context) Send(to address.Address, method string, value *types.AttoFIL, params []interface{}) ([][]byte, uint8, error) {
+func (ctx *Context) Send(to address.Address, method string, value types.AttoFIL, params []interface{}) ([][]byte, uint8, error) {
 	deps := ctx.deps
 
 	// the message sender is the `to` actor, so this is what we set as `from` in the new message
@@ -242,6 +213,11 @@ func (ctx *Context) CreateNewActor(addr address.Address, code cid.Cid, initializ
 // given height.
 func (ctx *Context) SampleChainRandomness(sampleHeight *types.BlockHeight) ([]byte, error) {
 	return sampling.SampleChainRandomness(sampleHeight, ctx.ancestors)
+}
+
+// Verifier returns an interface to the proof verification code
+func (ctx *Context) Verifier() verification.Verifier {
+	return &verification.RustVerifier{}
 }
 
 // Dependency injection setup.

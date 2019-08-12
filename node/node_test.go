@@ -7,41 +7,26 @@ import (
 	"testing"
 	"time"
 
-	"github.com/filecoin-project/go-filecoin/chain"
-	"github.com/filecoin-project/go-filecoin/config"
-	"github.com/filecoin-project/go-filecoin/consensus"
-	"github.com/filecoin-project/go-filecoin/core"
-	"github.com/filecoin-project/go-filecoin/mining"
-	"github.com/filecoin-project/go-filecoin/net"
-	"github.com/filecoin-project/go-filecoin/node"
-	"github.com/filecoin-project/go-filecoin/plumbing"
-	"github.com/filecoin-project/go-filecoin/plumbing/bcf"
-	pbConfig "github.com/filecoin-project/go-filecoin/plumbing/cfg"
-	"github.com/filecoin-project/go-filecoin/plumbing/msg"
-	"github.com/filecoin-project/go-filecoin/plumbing/strgdls"
-	"github.com/filecoin-project/go-filecoin/porcelain"
-	"github.com/filecoin-project/go-filecoin/proofs"
-	"github.com/filecoin-project/go-filecoin/protocol/storage"
-	"github.com/filecoin-project/go-filecoin/repo"
-	th "github.com/filecoin-project/go-filecoin/testhelpers"
-	"github.com/filecoin-project/go-filecoin/types"
-	"github.com/filecoin-project/go-filecoin/wallet"
-
-	tf "github.com/filecoin-project/go-filecoin/testhelpers/testflags"
-	"github.com/libp2p/go-libp2p-peerstore"
+	"github.com/libp2p/go-libp2p-core/peer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-)
 
-var mockSigner, _ = types.NewMockSignersAndKeyInfo(10)
+	"github.com/filecoin-project/go-filecoin/config"
+	"github.com/filecoin-project/go-filecoin/consensus"
+	"github.com/filecoin-project/go-filecoin/mining"
+	"github.com/filecoin-project/go-filecoin/node"
+	"github.com/filecoin-project/go-filecoin/proofs/verification"
+	"github.com/filecoin-project/go-filecoin/protocol/storage"
+	"github.com/filecoin-project/go-filecoin/repo"
+	tf "github.com/filecoin-project/go-filecoin/testhelpers/testflags"
+	"github.com/filecoin-project/go-filecoin/types"
+)
 
 func TestNodeConstruct(t *testing.T) {
 	tf.UnitTest(t)
 
-	assert := assert.New(t)
-
 	nd := node.MakeNodesUnstarted(t, 1, false)[0]
-	assert.NotNil(nd.Host)
+	assert.NotNil(t, nd.Host)
 
 	nd.Stop(context.Background())
 }
@@ -50,18 +35,17 @@ func TestNodeNetworking(t *testing.T) {
 	tf.UnitTest(t)
 
 	ctx := context.Background()
-	assert := assert.New(t)
 
 	nds := node.MakeNodesUnstarted(t, 2, false)
 	nd1, nd2 := nds[0], nds[1]
 
-	pinfo := peerstore.PeerInfo{
+	pinfo := peer.AddrInfo{
 		ID:    nd2.Host().ID(),
 		Addrs: nd2.Host().Addrs(),
 	}
 
 	err := nd1.Host().Connect(ctx, pinfo)
-	assert.NoError(err)
+	assert.NoError(t, err)
 
 	nd1.Stop(ctx)
 	nd2.Stop(ctx)
@@ -71,27 +55,23 @@ func TestConnectsToBootstrapNodes(t *testing.T) {
 	tf.UnitTest(t)
 
 	t.Run("no bootstrap nodes no problem", func(t *testing.T) {
-		assert := assert.New(t)
-		require := require.New(t)
 		ctx := context.Background()
 
 		r := repo.NewInMemoryRepo()
 		r.Config().Swarm.Address = "/ip4/0.0.0.0/tcp/0"
 
-		require.NoError(node.Init(ctx, r, consensus.DefaultGenesis))
+		require.NoError(t, node.Init(ctx, r, consensus.DefaultGenesis))
 		r.Config().Bootstrap.Addresses = []string{}
 		opts, err := node.OptionsFromRepo(r)
-		require.NoError(err)
+		require.NoError(t, err)
 
 		nd, err := node.New(ctx, opts...)
-		require.NoError(err)
-		assert.NoError(nd.Start(ctx))
+		require.NoError(t, err)
+		assert.NoError(t, nd.Start(ctx))
 		defer nd.Stop(ctx)
 	})
 
 	t.Run("connects to bootstrap nodes", func(t *testing.T) {
-		assert := assert.New(t)
-		require := require.New(t)
 		ctx := context.Background()
 
 		// These are two bootstrap nodes we'll connect to.
@@ -107,15 +87,16 @@ func TestConnectsToBootstrapNodes(t *testing.T) {
 		r := repo.NewInMemoryRepo()
 		r.Config().Swarm.Address = "/ip4/0.0.0.0/tcp/0"
 
-		require.NoError(node.Init(ctx, r, consensus.DefaultGenesis))
+		require.NoError(t, node.Init(ctx, r, consensus.DefaultGenesis))
 		r.Config().Bootstrap.Addresses = []string{peer1, peer2}
+
 		opts, err := node.OptionsFromRepo(r)
-		require.NoError(err)
+		require.NoError(t, err)
 		nd, err := node.New(ctx, opts...)
-		require.NoError(err)
+		require.NoError(t, err)
 		nd.Bootstrapper.MinPeerThreshold = 2
 		nd.Bootstrapper.Period = 10 * time.Millisecond
-		assert.NoError(nd.Start(ctx))
+		assert.NoError(t, nd.Start(ctx))
 		defer nd.Stop(ctx)
 
 		// Ensure they're connected.
@@ -132,142 +113,68 @@ func TestConnectsToBootstrapNodes(t *testing.T) {
 			time.Sleep(10 * time.Millisecond)
 		}
 
-		assert.True(connected, "failed to connect")
+		assert.True(t, connected, "failed to connect")
 	})
 }
 
 func TestNodeInit(t *testing.T) {
 	tf.UnitTest(t)
 
-	assert := assert.New(t)
 	ctx := context.Background()
 
 	nd := node.MakeOfflineNode(t)
 
-	assert.NoError(nd.Start(ctx))
+	assert.NoError(t, nd.Start(ctx))
 
-	assert.NotEqual(0, nd.ChainReader.GetHead().Len())
+	assert.NotEqual(t, 0, nd.ChainReader.GetHead().Len())
 	nd.Stop(ctx)
 }
 
 func TestNodeStartMining(t *testing.T) {
 	tf.UnitTest(t)
 
-	assert := assert.New(t)
 	ctx := context.Background()
 
 	seed := node.MakeChainSeed(t, node.TestGenCfg)
 	minerNode := node.MakeNodeWithChainSeed(t, seed, []node.ConfigOpt{}, node.PeerKeyOpt(node.PeerKeys[0]), node.AutoSealIntervalSecondsOpt(1))
 
-	walletBackend, _ := wallet.NewDSBackend(minerNode.Repo.WalletDatastore())
-	validator := consensus.NewDefaultMessageValidator()
-
-	// TODO we need a principled way to construct an API that can be used both by node and by
-	// tests. It should enable selective replacement of dependencies.
-	// https://github.com/filecoin-project/go-filecoin/issues/2352
-	plumbingAPI := plumbing.New(&plumbing.APIDeps{
-		Chain:        bcf.NewBlockChainFacade(minerNode.ChainReader, minerNode.CborStore()),
-		Config:       pbConfig.NewConfig(minerNode.Repo),
-		MsgPool:      nil,
-		MsgPreviewer: msg.NewPreviewer(minerNode.Wallet, minerNode.ChainReader, minerNode.CborStore(), minerNode.Blockstore),
-		MsgQueryer:   msg.NewQueryer(minerNode.Repo, minerNode.Wallet, minerNode.ChainReader, minerNode.CborStore(), minerNode.Blockstore),
-		MsgSender:    msg.NewSender(minerNode.Wallet, nil, minerNode.CborStore(), nil, minerNode.Outbox, minerNode.MsgPool, validator, minerNode.PorcelainAPI.PubSubPublish),
-		MsgWaiter:    msg.NewWaiter(minerNode.ChainReader, minerNode.Blockstore, minerNode.CborStore()),
-		Network:      net.New(minerNode.Host(), nil, nil, nil, nil, nil),
-		Wallet:       wallet.New(walletBackend),
-		Deals:        strgdls.New(minerNode.Repo.DealsDatastore()),
-	})
-	porcelainAPI := porcelain.New(plumbingAPI)
-
 	seed.GiveKey(t, minerNode, 0)
-	mineraddr, minerOwnerAddr := seed.GiveMiner(t, minerNode, 0)
-	_, err := storage.NewMiner(mineraddr, minerOwnerAddr, minerNode, minerNode.Repo.DealsDatastore(), porcelainAPI)
-	assert.NoError(err)
+	mineraddr, ownerAddr := seed.GiveMiner(t, minerNode, 0)
+	// Start mining give error for fail to get miner actor from the heaviest tipset stateroot
+	assert.Contains(t, minerNode.StartMining(ctx).Error(), "failed to get miner actor")
+	_, err := storage.NewMiner(mineraddr, ownerAddr, ownerAddr, &storage.FakeProver{}, types.OneKiBSectorSize, minerNode, minerNode.Repo.DealsDatastore(), nil)
+	assert.NoError(t, err)
 
-	assert.NoError(minerNode.Start(ctx))
+	assert.NoError(t, minerNode.Start(ctx))
 
 	t.Run("Start/Stop/Start results in a MiningScheduler that is started", func(t *testing.T) {
-		assert.NoError(minerNode.StartMining(ctx))
+		assert.NoError(t, minerNode.StartMining(ctx))
 		defer minerNode.StopMining(ctx)
-		assert.True(minerNode.MiningScheduler.IsStarted())
+		assert.True(t, minerNode.MiningScheduler.IsStarted())
 		minerNode.StopMining(ctx)
-		assert.False(minerNode.MiningScheduler.IsStarted())
-		assert.NoError(minerNode.StartMining(ctx))
-		assert.True(minerNode.MiningScheduler.IsStarted())
+		assert.False(t, minerNode.MiningScheduler.IsStarted())
+		assert.NoError(t, minerNode.StartMining(ctx))
+		assert.True(t, minerNode.MiningScheduler.IsStarted())
 	})
 
 	t.Run("Start + Start gives an error message saying mining is already started", func(t *testing.T) {
-		assert.NoError(minerNode.StartMining(ctx))
+		assert.NoError(t, minerNode.StartMining(ctx))
 		defer minerNode.StopMining(ctx)
 		err := minerNode.StartMining(ctx)
-		assert.Error(err, "node is already mining")
+		assert.Error(t, err, "node is already mining")
 	})
 
-}
-
-func TestUpdateMessagePool(t *testing.T) {
-	tf.UnitTest(t)
-
-	// Note: majority of tests are in message_pool_test. This test
-	// just makes sure it looks like it is hooked up correctly.
-	assert := assert.New(t)
-	require := require.New(t)
-	ctx := context.Background()
-	node := node.MakeNodesUnstarted(t, 1, true)[0]
-	chainForTest, ok := node.ChainReader.(chain.Store)
-	require.True(ok)
-
-	// Msg pool: [m0, m1],   Chain: gen -> b[m2, m3]
-	// to
-	// Msg pool: [m0, m3],   Chain: gen -> b[] -> b[m1, m2]
-	assert.NoError(chainForTest.Load(ctx)) // load up head to get genesis block
-	head := chainForTest.GetHead()
-	headTipSetAndState, err := chainForTest.GetTipSetAndState(head)
-	require.NoError(err)
-	genTS := headTipSetAndState.TipSet
-	m := types.NewSignedMsgs(4, mockSigner)
-	core.MustAdd(node.MsgPool, m[0], m[1])
-
-	oldChain := core.NewChainWithMessages(node.CborStore(), genTS, [][]*types.SignedMessage{{m[2], m[3]}})
-	newChain := core.NewChainWithMessages(node.CborStore(), genTS, [][]*types.SignedMessage{{}}, [][]*types.SignedMessage{{m[1], m[2]}})
-
-	th.RequirePutTsas(ctx, require, chainForTest, &chain.TipSetAndState{
-		TipSet:          oldChain[len(oldChain)-1],
-		TipSetStateRoot: genTS.ToSlice()[0].StateRoot,
-	})
-	assert.NoError(chainForTest.SetHead(ctx, oldChain[len(oldChain)-1]))
-	assert.NoError(node.Start(ctx))
-	updateMsgPoolDoneCh := make(chan struct{})
-	node.HeaviestTipSetHandled = func() { updateMsgPoolDoneCh <- struct{}{} }
-	// Triggers a notification, node should update the message pool as a result.
-	th.RequirePutTsas(ctx, require, chainForTest, &chain.TipSetAndState{
-		TipSet:          newChain[len(newChain)-2],
-		TipSetStateRoot: genTS.ToSlice()[0].StateRoot,
-	})
-	th.RequirePutTsas(ctx, require, chainForTest, &chain.TipSetAndState{
-		TipSet:          newChain[len(newChain)-1],
-		TipSetStateRoot: genTS.ToSlice()[0].StateRoot,
-	})
-	assert.NoError(chainForTest.SetHead(ctx, newChain[len(newChain)-1]))
-	<-updateMsgPoolDoneCh
-	assert.Equal(2, len(node.MsgPool.Pending()))
-	pending := node.MsgPool.Pending()
-
-	assert.True(types.SmsgCidsEqual(m[0], pending[0]) || types.SmsgCidsEqual(m[0], pending[1]))
-	assert.True(types.SmsgCidsEqual(m[3], pending[0]) || types.SmsgCidsEqual(m[3], pending[1]))
-	node.Stop(ctx)
 }
 
 func TestOptionWithError(t *testing.T) {
 	tf.UnitTest(t)
 
 	ctx := context.Background()
-	assert := assert.New(t)
 	r := repo.NewInMemoryRepo()
-	assert.NoError(node.Init(ctx, r, consensus.DefaultGenesis))
+	assert.NoError(t, node.Init(ctx, r, consensus.DefaultGenesis))
 
 	opts, err := node.OptionsFromRepo(r)
-	assert.NoError(err)
+	assert.NoError(t, err)
 
 	scaryErr := errors.New("i am an error grrrr")
 	errOpt := func(c *node.Config) error {
@@ -277,19 +184,19 @@ func TestOptionWithError(t *testing.T) {
 	opts = append(opts, errOpt)
 
 	_, err = node.New(ctx, opts...)
-	assert.Error(err, scaryErr)
+	assert.Error(t, err, scaryErr)
 
 }
 
 func TestNodeConfig(t *testing.T) {
 	tf.UnitTest(t)
 
-	assert := assert.New(t)
-
 	defaultCfg := config.NewDefaultConfig()
 
 	// fake mining
-	verifier := proofs.NewFakeVerifier(true, nil)
+	verifier := &verification.FakeVerifier{
+		VerifyPoStValid: true,
+	}
 
 	configBlockTime := 99
 
@@ -314,10 +221,10 @@ func TestNodeConfig(t *testing.T) {
 
 	actualBlockTime := time.Duration(configBlockTime / mining.MineDelayConversionFactor)
 
-	assert.Equal(actualBlockTime, blockTime)
-	assert.Equal(true, n.OfflineMode)
-	assert.Equal(defaultCfg.Mining, cfg.Mining)
-	assert.Equal(&config.SwarmConfig{
+	assert.Equal(t, actualBlockTime, blockTime)
+	assert.Equal(t, true, n.OfflineMode)
+	assert.Equal(t, defaultCfg.Mining, cfg.Mining)
+	assert.Equal(t, &config.SwarmConfig{
 		Address: "/ip4/0.0.0.0/tcp/0",
 	}, cfg.Swarm)
 }

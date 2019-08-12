@@ -14,21 +14,25 @@ import (
 	. "github.com/filecoin-project/go-filecoin/gengen/util"
 	th "github.com/filecoin-project/go-filecoin/testhelpers"
 	tf "github.com/filecoin-project/go-filecoin/testhelpers/testflags"
+	"github.com/filecoin-project/go-filecoin/types"
 
 	"github.com/stretchr/testify/assert"
 )
 
 var testConfig = &GenesisCfg{
-	Keys:     4,
-	PreAlloc: []string{"10", "50"},
-	Miners: []Miner{
+	ProofsMode: types.TestProofsMode,
+	Keys:       4,
+	PreAlloc:   []string{"10", "50"},
+	Miners: []*CreateStorageMinerConfig{
 		{
-			Owner: 0,
-			Power: 50,
+			Owner:               0,
+			NumCommittedSectors: 50,
+			SectorSize:          types.OneKiBSectorSize.Uint64(),
 		},
 		{
-			Owner: 1,
-			Power: 10,
+			Owner:               1,
+			NumCommittedSectors: 10,
+			SectorSize:          types.OneKiBSectorSize.Uint64(),
 		},
 	},
 }
@@ -36,13 +40,12 @@ var testConfig = &GenesisCfg{
 func TestGenGenLoading(t *testing.T) {
 	tf.IntegrationTest(t)
 
-	assert := assert.New(t)
 	fi, err := ioutil.TempFile("", "gengentest")
-	assert.NoError(err)
+	assert.NoError(t, err)
 
 	_, err = GenGenesisCar(testConfig, fi, 0)
-	assert.NoError(err)
-	assert.NoError(fi.Close())
+	assert.NoError(t, err)
+	assert.NoError(t, fi.Close())
 
 	td := th.NewDaemon(t, th.GenesisFile(fi.Name())).Start()
 	defer td.ShutdownSuccess()
@@ -50,14 +53,12 @@ func TestGenGenLoading(t *testing.T) {
 	o := td.Run("actor", "ls").AssertSuccess()
 
 	stdout := o.ReadStdout()
-	assert.Contains(stdout, `"MinerActor"`)
-	assert.Contains(stdout, `"StoragemarketActor"`)
+	assert.Contains(t, stdout, `"MinerActor"`)
+	assert.Contains(t, stdout, `"StoragemarketActor"`)
 }
 
 func TestGenGenDeterministicBetweenBuilds(t *testing.T) {
 	tf.UnitTest(t)
-
-	assert := assert.New(t)
 
 	var info *RenderedGenInfo
 	for i := 0; i < 50; i++ {
@@ -70,11 +71,11 @@ func TestGenGenDeterministicBetweenBuilds(t *testing.T) {
 		ctx := context.Background()
 
 		inf, err := GenGen(ctx, testConfig, cst, bstore, 0)
-		assert.NoError(err)
+		assert.NoError(t, err)
 		if info == nil {
 			info = inf
 		} else {
-			assert.Equal(info, inf)
+			assert.Equal(t, info, inf)
 		}
 	}
 }

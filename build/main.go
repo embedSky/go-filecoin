@@ -3,12 +3,15 @@ package main
 import (
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/filecoin-project/go-filecoin/util/version"
 )
@@ -21,7 +24,10 @@ func init() {
 		lineBreak = "\r\n"
 	}
 	// We build with go modules.
-	os.Setenv("GO111MODULE", "on")
+	if err := os.Setenv("GO111MODULE", "on"); err != nil {
+		fmt.Println("Failed to set GO111MODULE env")
+		os.Exit(1)
+	}
 }
 
 // command is a structure representing a shell command to be run in the
@@ -117,6 +123,7 @@ func deps() {
 		cmd("go mod download"),
 		// Download and build proofs.
 		cmd("./scripts/install-rust-fil-proofs.sh"),
+		cmd("./scripts/install-rust-fil-sector-builder.sh"),
 		cmd("./scripts/install-bls-signatures.sh"),
 		cmd("./scripts/install-filecoin-parameters.sh"),
 	}
@@ -143,6 +150,8 @@ func build() {
 	buildFaucet()
 	buildGenesisFileServer()
 	generateGenesis()
+	buildMigrations()
+	buildPrereleaseTool()
 }
 
 func forcebuild() {
@@ -151,6 +160,8 @@ func forcebuild() {
 	buildFaucet()
 	buildGenesisFileServer()
 	generateGenesis()
+	buildMigrations()
+	buildPrereleaseTool()
 }
 
 func forceBuildFC() {
@@ -163,20 +174,71 @@ func forceBuildFC() {
 	}...))
 }
 
+// cleanDirectory removes the child of a directly wihtout removing the directory itself, unlike `RemoveAll`.
+// There is also an additional parameter to ignore dot files which is important for directories which are normally
+// empty. Git has no concept of directories, so for a directory to automatically be created on checkout, a file must
+// exist in side of it. We use this pattern in a few places, so the need to keep the dot files around is impotant.
+func cleanDirectory(dir string, ignoredots bool) error {
+	if abs := filepath.IsAbs(dir); !abs {
+		return fmt.Errorf("Directory %s is not an absolute path, could not clean directory", dir)
+	}
+
+	files, err := ioutil.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+
+	for _, file := range files {
+		fname := file.Name()
+		if ignoredots && []rune(fname)[0] == '.' {
+			continue
+		}
+
+		fpath := filepath.Join(dir, fname)
+
+		fmt.Println("Removing", fpath)
+		if err := os.RemoveAll(fpath); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func generateGenesis() {
 	log.Println("Generating genesis...")
+
+	liveFixtures, err := filepath.Abs("./fixtures/live")
+	if err != nil {
+		panic(err)
+	}
+
+	if err := cleanDirectory(liveFixtures, true); err != nil {
+		panic(err)
+	}
+
 	runCmd(cmd([]string{
 		"./gengen/gengen",
-		"--keypath", "fixtures/live",
-		"--out-car", "fixtures/live/genesis.car",
-		"--out-json", "fixtures/live/gen.json",
+		"--keypath", liveFixtures,
+		"--out-car", filepath.Join(liveFixtures, "genesis.car"),
+		"--out-json", filepath.Join(liveFixtures, "gen.json"),
 		"--config", "./fixtures/setup.json",
 	}...))
+
+	testFixtures, err := filepath.Abs("./fixtures/test")
+	if err != nil {
+		panic(err)
+	}
+
+	if err := cleanDirectory(testFixtures, true); err != nil {
+		panic(err)
+	}
+
 	runCmd(cmd([]string{
 		"./gengen/gengen",
-		"--keypath", "fixtures/test",
-		"--out-car", "fixtures/test/genesis.car",
-		"--out-json", "fixtures/test/gen.json",
+		"--keypath", testFixtures,
+		"--out-car", filepath.Join(testFixtures, "genesis.car"),
+		"--out-json", filepath.Join(testFixtures, "gen.json"),
 		"--config", "./fixtures/setup.json",
 		"--test-proofs-mode",
 	}...))
@@ -210,17 +272,39 @@ func buildGenesisFileServer() {
 	runCmd(cmd([]string{"go", "build", "-o", "./tools/genesis-file-server/genesis-file-server", "./tools/genesis-file-server/"}...))
 }
 
+func buildMigrations() {
+	log.Println("Building migrations...")
+	runCmd(cmd([]string{
+		"go", "build", "-o", "./tools/migration/go-filecoin-migrate", "./tools/migration/main.go"}...))
+}
+
+func buildPrereleaseTool() {
+	log.Println("Building prerelease-tool...")
+
+	runCmd(cmd([]string{"go", "build", "-o", "./tools/prerelease-tool/prerelease-tool", "./tools/prerelease-tool/"}...))
+}
+
 func install() {
 	log.Println("Installing...")
 
-	runCmd(cmd("go", "install", "-ldflags", fmt.Sprintf(`"-X github.com/filecoin-project/go-filecoin/flags.Commit=%s"`, getCommitSha())))
+	runCmd(cmd("go", "install", "-ldflags", fmt.Sprintf("-X github.com/filecoin-project/go-filecoin/flags.Commit=%s", getCommitSha())))
 }
 
 // test executes tests and passes along all additional arguments to `go test`.
-func test(args ...string) {
-	log.Println("Testing...")
+func test(userArgs ...string) {
+	log.Println("Running tests...")
 
-	runCmd(cmd(fmt.Sprintf("go test -timeout 30m -parallel 8 ./... %s", strings.Join(args, " "))))
+	// Consult environment for test packages, in order to support CI container-level parallelism.
+	packages, ok := os.LookupEnv("TEST_PACKAGES")
+	if !ok {
+		packages = "./..."
+	}
+
+	begin := time.Now()
+	runCmd(cmd(fmt.Sprintf("go test %s %s",
+		strings.Replace(packages, "\n", " ", -1), strings.Join(userArgs, " "))))
+	end := time.Now()
+	log.Printf("Tests finished in %.1f seconds\n", end.Sub(begin).Seconds())
 }
 
 func main() {
@@ -247,6 +331,8 @@ func main() {
 		buildGengen()
 	case "generate-genesis":
 		generateGenesis()
+	case "build-migrations":
+		buildMigrations()
 	case "build":
 		build()
 	case "fbuild":
